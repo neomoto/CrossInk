@@ -1,3 +1,19 @@
+## Unreleased
+
+### Added
+
+- Enable sensor-driven, four-way auto-rotation for EPUB and TXT reading on devices
+  with an IMU; stable-pose detection ignores flat, ambiguous, or unstable readings.
+- Assign Rotate Page CW to the Power button's long-press action.
+
+### Fixed
+
+- Keep handled Power holds suppressed through release, without running the short
+  action in another input consumer.
+- Keep the same reading passage visible through consecutive orientation changes.
+- Keep TXT sleep-page reconstruction aligned with the live page after rotation,
+  including reflows that change the page's byte offset without changing its number.
+
 ## [v1.6.1] - 2026-10-03
 
 ### Added

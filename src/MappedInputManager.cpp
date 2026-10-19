@@ -954,7 +954,7 @@ bool MappedInputManager::wasReleased(const Button button) const {
     // loop. Keep the suppression set until the edge expires so the global
     // shortcut dispatcher cannot consume it first and leave the reader's
     // later handler to run the configured short-Power action.
-    if (releaseSuppression.consumePowerRelease()) {
+    if (releaseSuppression.isPowerReleaseSuppressed()) {
       return false;
     }
 

@@ -2319,6 +2319,8 @@ void EpubReaderActivity::endGlobalSettingsEditForBookReader(void* ctx) {
 
 void EpubReaderActivity::onEnter() {
   Activity::onEnter();
+  ReaderUtils::resetAutoRotation();
+  rotationVisibleTextOffset.reset();
   pageLoadRetryCount = 0;
   touchReaderDrawerState = initialReaderDrawerState(mappedInput.hasTouchHardware());
 
@@ -2389,6 +2391,8 @@ void EpubReaderActivity::onEnter() {
       }
       if (progress.hasVisibleTextOffset) {
         cachedVisibleTextOffset = progress.visibleTextOffset;
+        rotationVisibleTextOffset = progress.visibleTextOffset;
+        rotationAnchorSpineIndex = currentSpineIndex;
         // A content position may come from another device whose page count does not
         // match this layout.  Let the section builder resolve it before showing a page.
         pendingRelayoutReposition = true;
@@ -2471,6 +2475,7 @@ void EpubReaderActivity::onEnter() {
 }
 
 void EpubReaderActivity::onExit() {
+  ReaderUtils::resetAutoRotation();
   sdFontSystem.setSettingsPersistenceCallback(nullptr, nullptr);
   // Drop the scalable-family catalog retained during reading. The active font
   // and its PSRAM face lifetime remain managed by SdCardFontSystem.
@@ -2814,7 +2819,10 @@ void EpubReaderActivity::loop() {
     cancelSilentPrefetchForInput();
   }
 
-  if (quickActionsPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+  if (quickActionsPopup.handleInput(mappedInput, [this] { requestUpdate(); })) {
+    ReaderUtils::resetAutoRotation();
+    return;
+  }
   if (!epub) {
     // Should never happen
     finish();
@@ -3140,6 +3148,7 @@ void EpubReaderActivity::loop() {
   // Enter reader menu activity.
   if (!endOfBookMenuOpen && (confirmReleased || ReaderUtils::isTouchMenuGesture(mappedInput))) {
     openReaderMenu();
+    return;
   }
 
   if (!endOfBookMenuOpen && handleTouchDictionaryLookup()) {
@@ -3191,6 +3200,7 @@ void EpubReaderActivity::loop() {
           const bool next = side.action == CrossPointSettings::SIDE_NEXT_CHAPTER;
           clearPendingManualPageTurns();
           if (!next && isAtBookStart()) break;
+          rotationVisibleTextOffset.reset();
           if (!next && section && section->currentPage > 0) {
             section->currentPage = 0;
           } else {
@@ -3269,6 +3279,7 @@ void EpubReaderActivity::loop() {
       frontButtonLongPressHandled = true;
       if (SETTINGS.longPressButtonBehavior == CrossPointSettings::CHAPTER_SKIP) {
         clearPendingManualPageTurns();
+        rotationVisibleTextOffset.reset();
         if (!nextLongPressed && currentSpineIndex <= 0) {
           bool changed = false;
           {
@@ -3352,6 +3363,7 @@ void EpubReaderActivity::loop() {
     if (drainPendingManualPageTurn()) {
       return;
     }
+    if (applyAutoRotation()) return;
     idlePrewarmNextPage();
     return;
   }
@@ -3398,6 +3410,7 @@ void EpubReaderActivity::loop() {
   if (skipChapter) {
     clearPendingManualPageTurns();
     if (!nextTriggered && isAtBookStart()) return;
+    rotationVisibleTextOffset.reset();
     if (!nextTriggered && section && section->currentPage > 0) {
       section->currentPage = 0;
       requestUpdate();
@@ -3470,6 +3483,7 @@ bool EpubReaderActivity::handleTwoFingerSwipeAction(const CrossPointSettings::TW
       }
       if (activeFootnotePreview || targetSpine < 0 || targetSpine >= epub->getSpineItemsCount()) return true;
       clearPendingManualPageTurns();
+      rotationVisibleTextOffset.reset();
       {
         RenderLock lock(*this);
         nextPageNumber = 0;
@@ -5195,6 +5209,10 @@ bool EpubReaderActivity::handleShortcutAction(const uint8_t rawAction) {
       return dispatchShortcutAction(action);
     case CrossPointSettings::SHORT_PWRBTN::LIBRARY:
       return handleGlobalPowerButtonAction(action);
+    case CrossPointSettings::SHORT_PWRBTN::ROTATE_CLOCKWISE:
+      applyOrientation(ReaderUtils::rotatedOrientation(SETTINGS.orientation, true));
+      requestUpdate();
+      return true;
     case CrossPointSettings::SHORT_PWRBTN::QUICK_LOCK:
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_FRONTLIGHT:
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_TOUCHSCREEN:
@@ -5286,6 +5304,10 @@ bool EpubReaderActivity::handleShortcutAction(const CrossPointSettings::SHORT_PW
       return true;
     case CrossPointSettings::SHORT_PWRBTN::LIBRARY:
       return handleGlobalPowerButtonAction(action);
+    case CrossPointSettings::SHORT_PWRBTN::ROTATE_CLOCKWISE:
+      applyOrientation(ReaderUtils::rotatedOrientation(SETTINGS.orientation, true));
+      requestUpdate();
+      return true;
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_FRONTLIGHT:
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_TOUCHSCREEN:
       return handleGlobalPowerButtonAction(action);
@@ -5505,7 +5527,7 @@ bool EpubReaderActivity::consumeLongPowerButtonRelease() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Power) ||
-      !mappedInput.isPressed(MappedInputManager::Button::Power)) {
+      !mappedInput.isPhysicalPressed(MappedInputManager::Button::Power)) {
     longPowerButtonHandled = false;
     return true;
   }
@@ -5531,6 +5553,10 @@ bool EpubReaderActivity::executeLongPowerButtonAction() {
   }
 
   switch (SETTINGS.longPwrBtn) {
+    case CrossPointSettings::SHORT_PWRBTN::ROTATE_CLOCKWISE:
+      applyOrientation(ReaderUtils::rotatedOrientation(SETTINGS.orientation, true));
+      requestUpdate();
+      return true;
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_FONT:
       executeReaderQuickAction(CrossPointSettings::LONG_MENU_CHANGE_FONT);
       return true;
@@ -5748,6 +5774,12 @@ bool EpubReaderActivity::restoreRenderModeToastRegion() {
 }
 
 void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
+  RenderLock lock(*this);
+  applyOrientation(orientation, std::move(lock));
+}
+
+void EpubReaderActivity::applyOrientation(const uint8_t orientation, RenderLock&&) {
+  ReaderUtils::resetAutoRotation();
   const auto targetOrientation = ReaderUtils::toRendererOrientation(orientation);
   const bool settingsChanged = SETTINGS.orientation != orientation;
   const bool rendererChanged = renderer.getOrientation() != targetOrientation;
@@ -5759,28 +5791,63 @@ void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
 
   clearPendingManualPageTurns();
 
-  {
-    RenderLock lock(*this);
-
-    // Preserve current reading position only when we need a live re-layout.
-    if (rendererChanged && section) {
-      prepareCurrentSectionForRelayout();
-    }
-
-    if (settingsChanged) {
-      // Persist the selection for this book without changing global reader defaults.
-      SETTINGS.orientation = orientation;
-      saveCurrentBookReaderSettings();
-    }
-
-    if (rendererChanged) {
-      // Update renderer orientation to match the new logical coordinate system.
-      renderer.setOrientation(targetOrientation);
-
-      // Reset section to force re-layout in the new orientation.
-      section.reset();
-    }
+  // A second rotation during reflow must retain the original content anchor,
+  // rather than replacing it with an interim page or a pending navigation target.
+  if (rendererChanged && section && !pendingRelayoutReposition && !pendingPercentJump && !pendingPageJump &&
+      pendingAnchor.empty() && pendingParagraphIndex == UINT16_MAX && !pendingResolvedReferencePage &&
+      !pendingReferenceUnitOffset) {
+    const auto previousAnchor = rotationVisibleTextOffset;
+    const bool keepRotationAnchor = previousAnchor && rotationAnchorSpineIndex == currentSpineIndex &&
+                                    section->getPageForVisibleTextOffset(*previousAnchor, true) ==
+                                        std::optional<uint16_t>(static_cast<uint16_t>(section->currentPage));
+    prepareCurrentSectionForRelayout();
+    if (keepRotationAnchor) cachedVisibleTextOffset = previousAnchor;
+    rotationVisibleTextOffset = cachedVisibleTextOffset;
+    rotationAnchorSpineIndex = currentSpineIndex;
   }
+
+  if (settingsChanged) {
+    // Persist the selection for this book without changing global reader defaults.
+    SETTINGS.orientation = orientation;
+    saveCurrentBookReaderSettings();
+  }
+
+  if (rendererChanged) {
+    renderer.setOrientation(targetOrientation);
+    section.reset();
+  }
+}
+
+bool EpubReaderActivity::applyAutoRotation() {
+  if (!SETTINGS.autoRotate) {
+    ReaderUtils::resetAutoRotation();
+    return false;
+  }
+
+  RenderLock lock(*this, RenderLock::Mode::Try);
+  if (!lock.ownsLock()) {
+    ReaderUtils::resetAutoRotation();
+    return false;
+  }
+  // Wait for the visible position to settle. Sensor samples must never cancel
+  // a queued turn, overwrite a pending jump, or reflow underneath an overlay.
+  if (!section || section->currentPage < 0 || section->currentPage >= section->pageCount ||
+      (section->isBuilding() && !section->activeBuildHasCaughtReadablePages()) || pendingManualPageTurns.hasPending() ||
+      pendingManualPageTurns.hasDispatched() || pendingRelayoutReposition || pendingPercentJump || pendingPageJump ||
+      !pendingAnchor.empty() || pendingParagraphIndex != UINT16_MAX || pendingResolvedReferencePage ||
+      pendingReferenceUnitOffset || progressSaveRequiredAfterRelayout || pendingTtfRenderRelayout ||
+      buildPopupPending || activeFootnotePreview || completionPromptQueued || pendingBookmarkFeedback ||
+      pendingCompletedFeedback || pendingTiltPageTurnFeedback || pendingRenderModeToast || pendingSafeModeToast ||
+      quickActionsPopup.isActive() || currentSpineIndex >= epub->getSpineItemsCount()) {
+    ReaderUtils::resetAutoRotation();
+    return false;
+  }
+
+  uint8_t targetOrientation;
+  if (!ReaderUtils::takeAutoRotation(mappedInput, targetOrientation)) return false;
+  applyOrientation(targetOrientation, std::move(lock));
+  requestUpdate();
+  return true;
 }
 
 uint16_t EpubReaderActivity::getAutoPageTurnIntervalSeconds() const {
@@ -5908,6 +5975,7 @@ bool EpubReaderActivity::isAtBookStart() const {
 
 void EpubReaderActivity::pageTurn(bool isForwardTurn, const char* source) {
   if (!isForwardTurn && isAtBookStart()) return;
+  rotationVisibleTextOffset.reset();
   pageLoadRetryCount = 0;
   if (activeFootnotePreview) {
     if (isForwardTurn) {
@@ -7099,6 +7167,11 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
   if (!activeFootnotePreview && section && spineIndex == currentSpineIndex && currentPage >= 0 &&
       currentPage < section->pageCount) {
     visibleTextOffset = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage));
+    if (rotationVisibleTextOffset && rotationAnchorSpineIndex == spineIndex &&
+        section->getPageForVisibleTextOffset(*rotationVisibleTextOffset, true) ==
+            std::optional<uint16_t>(static_cast<uint16_t>(currentPage))) {
+      visibleTextOffset = rotationVisibleTextOffset;
+    }
   }
   if (section && section->isBuilding() && spineIndex == currentSpineIndex) {
     // Free lazy-build cache files before opening progress.bin; X4/SdFat can reject
@@ -7237,6 +7310,7 @@ void EpubReaderActivity::cacheCurrentSectionPosition() {
 }
 
 void EpubReaderActivity::prepareCurrentSectionForRelayout() {
+  rotationVisibleTextOffset.reset();
   if (!section) return;
   cacheCurrentSectionPosition();
 }
@@ -8006,6 +8080,7 @@ std::string EpubReaderActivity::footnotePreviewCacheSuffix(const EpubRenderMode 
 
 void EpubReaderActivity::clearFootnotePreviewState() {
   pendingFootnotePreviewAnchor.clear();
+  rotationVisibleTextOffset.reset();
   activeFootnotePreview = false;
 }
 

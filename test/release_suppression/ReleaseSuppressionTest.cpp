@@ -49,11 +49,31 @@ TEST(ReleaseSuppressionTest, PowerSuppressionRemainsDuringReleaseAndExpiresAfter
 
   suppression.expireAfterReleaseFrame({.powerReleased = true});
   EXPECT_TRUE(suppression.isPowerReleaseSuppressed());
-  EXPECT_TRUE(suppression.consumePowerRelease());
 
-  suppression.suppressPower();
   suppression.expireAfterReleaseFrame({});
   EXPECT_FALSE(suppression.isPowerReleaseSuppressed());
+}
+
+TEST(ReleaseSuppressionTest, PowerReleaseFrameCoversMultipleConsumersAndCanBeRearmed) {
+  ReleaseSuppression suppression;
+  auto releaseVisibleToConsumer = [&suppression](const bool released) {
+    return released && !suppression.isPowerReleaseSuppressed();
+  };
+  for (int gesture = 0; gesture < 2; ++gesture) {
+    suppression.suppressPower();
+    suppression.expireAfterReleaseFrame({.powerHeld = true});
+    EXPECT_FALSE(releaseVisibleToConsumer(false));
+
+    suppression.expireAfterReleaseFrame({.powerReleased = true});
+    EXPECT_FALSE(releaseVisibleToConsumer(true));  // Global shortcuts query first.
+    EXPECT_FALSE(releaseVisibleToConsumer(true));  // The reader sees the same edge.
+
+    suppression.expireAfterReleaseFrame({});
+    EXPECT_FALSE(releaseVisibleToConsumer(false));
+    suppression.expireAfterReleaseFrame({.powerHeld = true});
+    suppression.expireAfterReleaseFrame({.powerReleased = true});
+    EXPECT_TRUE(releaseVisibleToConsumer(true));  // A later normal gesture is not swallowed.
+  }
 }
 
 TEST(ReleaseSuppressionTest, PowerConfirmSuppressionExpiresWithoutAConsumer) {

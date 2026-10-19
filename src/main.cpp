@@ -1631,6 +1631,13 @@ void loop() {
 #ifdef SIMULATOR
   simulatorHomeKeyInput.update();
 #endif
+  const bool sensorReaderActive = activityManager.isActiveBookReaderActivity() &&
+                                  !activityManager.blocksGlobalInput() && !buttonShortcutController.isQuickLocked();
+  const bool autoRotationActive = sensorReaderActive && SETTINGS.autoRotate && activityManager.canAutoRotateReader();
+  if (!autoRotationActive) ReaderUtils::resetAutoRotation();
+  halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.tiltPageTurnDirection, SETTINGS.orientation, sensorReaderActive,
+                       autoRotationActive);
+
   if (activityManager.requiresExclusiveStorageLoop()) {
     // Keep the serial endpoint responsive so Inky receives ERR:not_on_home,
     // while every filesystem/UI/global path remains suspended by the activity.
@@ -1646,11 +1653,6 @@ void loop() {
       delay(50);
     }
     return;
-  }
-
-  if (!buttonShortcutController.isQuickLocked()) {
-    halTiltSensor.update(SETTINGS.tiltPageTurn, SETTINGS.tiltPageTurnDirection, SETTINGS.orientation,
-                         activityManager.isReaderActivity());
   }
 
   renderer.setFadingFix(SETTINGS.fadingFix);

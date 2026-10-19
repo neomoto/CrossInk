@@ -74,6 +74,8 @@ class Activity {
   // Reader-mode child screens may also report isReaderActivity(); only the
   // activity owning the open book should be the Home/Reader unwind target.
   virtual bool isBookReaderActivity() const { return false; }
+  // Fixed-page formats and reader overlays cannot reflow for sensor rotation.
+  virtual bool supportsAutoRotation() const { return false; }
   virtual bool isHomeActivity() const { return false; }
   // The open book uses its vertical swipe actions across the entire page;
   // dialogs and lists retain their normal edge or scroll gestures.

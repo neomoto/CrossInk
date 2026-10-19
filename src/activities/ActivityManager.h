@@ -178,6 +178,8 @@ class ActivityManager {
   bool blocksGlobalInput() const;
   bool isHomeActivity() const;
   bool isReaderActivity() const;
+  bool isActiveBookReaderActivity() const;
+  bool canAutoRotateReader() const;
   bool openReaderSettingsForTouchscreenEscapeHatch();
   bool handleHomeButtonBackOrHome();
   bool openReaderMenuFromShortcut();

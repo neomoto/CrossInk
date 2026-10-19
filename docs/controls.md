@@ -163,6 +163,27 @@ Alongside the usual reader shortcuts, you can choose:
 XTC books have pre-rendered pages, so font-size and page-rotation actions do not
 apply. **Orientation aware** remains a separate option for side-button mapping.
 
+## Automatic Reading Orientation
+
+On devices with a motion sensor, enable **Settings > Controls > Auto-rotate
+(EPUB/TXT)** to follow the device's orientation while reading. It is off by
+default. Hold a new upright pose steadily for about half a second; face-up,
+face-down, diagonal, and unstable readings do not rotate the page.
+
+Auto-rotation applies only to the foreground EPUB or TXT reader, not menus,
+Quick Lock, or pre-rendered XTC pages. It preserves the current reading passage
+and uses the existing reader orientation/reflow path. Sensor samples do not
+write settings or keep the reader awake; only confirmed orientation changes are
+saved. EPUB saves orientation per book, while TXT uses the global setting.
+
+Buttons and active screen gestures take precedence. If auto-rotation stays
+enabled, a stable physical pose can override a manual rotation after the
+interaction ends. Disable it when you want to keep a manually chosen orientation.
+
+This development build's physical X3 axis mapping still needs device validation.
+See [rotation verification](./simulator.md#rotation-verification) before treating
+simulator results as hardware proof.
+
 ## Power, Back, and Menu Button Actions
 
 Defaults:
@@ -177,6 +198,7 @@ Available actions include:
 - Ignore
 - Sleep (also available to chord and Home-button shortcuts)
 - Sleep/Wake or Wake (Power button only)
+- Rotate Page CW (Power long-press only; EPUB/TXT)
 - Next Page
 - Refresh Screen
 - Change Font
@@ -209,6 +231,10 @@ device only when its **Short-press Action** is **Sleep/Wake** or **Wake**.
 **Sleep** only puts an awake device to sleep; **Wake** does nothing while it is
 awake. Holding Power always wakes the sleeping device. For the full startup
 instructions, see [Power On / Off](./user-guide.md#power-on--off).
+
+For manual rotation, choose **Settings > Controls > Power Button > Long-press
+Action > Rotate Page CW**. Each hold turns the page clockwise once; holding
+longer does not repeat, and releasing does not also run the short-press action.
 
 Assign **Library** to a Power, Back/Menu long-press, chord, Home-button, or
 Quick Actions shortcut to open the book list directly, where that shortcut is

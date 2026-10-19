@@ -36,12 +36,6 @@ class ReleaseSuppression {
     return true;
   }
 
-  bool consumePowerRelease() {
-    if (!suppressPowerRelease_) return false;
-    suppressPowerRelease_ = false;
-    return true;
-  }
-
   bool consumePowerConfirmRelease() {
     if (!suppressPowerConfirmRelease_) return false;
     suppressPowerConfirmRelease_ = false;

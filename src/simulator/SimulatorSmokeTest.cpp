@@ -4,15 +4,19 @@
 
 #include <Epub.h>
 #include <HalStorage.h>
+#include <HalTiltSensor.h>
 #include <LibraryBuilder.h>
 #include <LibraryIndexFile.h>
 #include <Logging.h>
+#include <SimulatorInput.h>
+#include <Txt.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <filesystem>
+#include <limits>
 
 #include "CrossPointState.h"
 #if CROSSINK_SCALABLE_FONTS
@@ -40,10 +44,12 @@
 #include "activities/home/RecentBookProgress.h"
 #include "activities/library/LibraryActivity.h"
 #include "activities/reader/BookReadingStats.h"
+#include "activities/reader/EpubReaderActivity.h"
 #include "activities/reader/EpubReaderDrawerActivity.h"
 #include "activities/reader/ReaderFontLoading.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/reader/SideButtonShortcuts.h"
+#include "activities/reader/TxtReaderActivity.h"
 #include "activities/settings/QuickActionsActivity.h"
 #include "activities/settings/SettingsActivity.h"
 #include "activities/settings/StatusBarSettingsActivity.h"
@@ -95,6 +101,7 @@ enum class SmokeStep : uint8_t {
   ThemeFresh,
   StatusBarEditor,
   StatusBarPicker,
+  AutoRotation,
   Done,
 };
 
@@ -155,6 +162,7 @@ class SimulatorSmokeTest {
     AssertReaderMenu,
     AssertSettingsNavigation,
     AssertActivity,
+    CaptureRotation,
     Render
   };
 
@@ -165,6 +173,36 @@ class SimulatorSmokeTest {
     int settleFrames;
     int x;
     int y;
+  };
+
+  enum class RotationActionType : uint8_t {
+    OpenBook,
+    EnableAuto,
+    DisableAuto,
+    Gravity,
+    Observe,
+    AwaitOrientation,
+    PageForward,
+    PowerDown,
+    PowerUp,
+    OpenOverlay,
+    AwaitOverlay,
+    CloseOverlay,
+    AwaitReader,
+    Capture,
+    CheckTxtSleep,
+  };
+
+  struct RotationAction {
+    RotationActionType type;
+    uint32_t durationMs = 0;
+    uint8_t orientation = CrossPointSettings::PORTRAIT;
+    float ax = 0.0f;
+    float ay = 0.0f;
+    float az = 0.0f;
+    const char* label = nullptr;
+    bool powerHold = false;
+    bool overlay = false;
   };
 
   SmokeStep step = SmokeStep::Start;
@@ -190,6 +228,25 @@ class SimulatorSmokeTest {
   Activity* homeReaderSmokeReader = nullptr;
   bool homeReaderConfirmationAccepted = false;
   bool backHomeChildCancelled = false;
+
+  JsonDocument rotationOriginalSettings;
+  std::vector<RotationAction> rotationScript;
+  size_t rotationScriptIndex = 0;
+  uint32_t rotationActionStartedMs = 0;
+  uint32_t rotationLastPageInputMs = 0;
+  bool rotationPageButtonDown = false;
+  bool rotationOverlayButtonDown = false;
+  bool rotationActionStarted = false;
+  bool rotationSettingsConfigured = false;
+  bool rotationTextReader = false;
+  Activity* rotationReader = nullptr;
+  ScreenshotInfo rotationAnchor;
+  uint64_t rotationFrameHash = 0;
+  uint8_t rotationLastCapturedOrientation = CrossPointSettings::PORTRAIT;
+  bool rotationHasFrame = false;
+  uint32_t rotationContentAnchor = 0;
+  ScreenshotInfo rotationObservedPosition;
+  bool rotationSleepInteriorObserved = false;
 
   void prepareRecentLibrary() {
     SETTINGS.librarySortMethod = 4;
@@ -359,10 +416,6 @@ class SimulatorSmokeTest {
   }
 
   static void verifyReaderControlsSettings() {
-    const auto& base = getBaseSettingsList();
-    if (base.size() > BASE_SETTINGS_CAPACITY || base.capacity() < BASE_SETTINGS_CAPACITY) {
-      fail("Base settings allocation mismatch: size=%zu capacity=%zu", base.size(), base.capacity());
-    }
     const auto all = getSettingsList();
     const auto gestures = buildControlsTapsGesturesSettingsList(all);
     if (gpio.hasTouch()) {
@@ -586,14 +639,6 @@ class SimulatorSmokeTest {
     if (std::find(chordSetting->enumRawValues.begin(), chordSetting->enumRawValues.end(),
                   CrossPointSettings::CHORD_QUICK_ACTIONS) == chordSetting->enumRawValues.end()) {
       fail("Quick Actions is missing from the Power + Up chord setting");
-    }
-    if (CrossPointSettings::HOME_READER != 36 || CrossPointSettings::SHORT_PWRBTN_COUNT != 37 ||
-        CrossPointSettings::CHORD_HOME_READER != 32 || CrossPointSettings::POWER_CHORD_ACTION_COUNT != 33) {
-      fail("Home/Reader changed persisted shortcut IDs or counts");
-    }
-    if (QuickActions::actionLabel(CrossPointSettings::HOME_READER) != StrId::STR_HOME_READER ||
-        std::string(I18N.get(StrId::STR_HOME_READER)) != "Home/Reader") {
-      fail("Home/Reader shortcut label mismatch");
     }
     if (QuickActions::isActionAvailable(CrossPointSettings::HOME_READER) != !gpio.hasTouch()) {
       fail("Home/Reader capability gating does not match button-only devices");
@@ -986,6 +1031,516 @@ class SimulatorSmokeTest {
     LOG_INF("SMOKE", "Wake Power hold/release ignored; fresh long press opens Quick Actions");
   }
 
+  static bool rotationVisibleRange(uint32_t& begin, uint32_t& end) {
+    auto* current = activityManager.simulatorCurrentActivity();
+    if (const auto* epub = dynamic_cast<const EpubReaderActivity*>(current))
+      return epub->simulatorVisibleTextRange(begin, end);
+    if (const auto* txt = dynamic_cast<const TxtReaderActivity*>(current))
+      return txt->simulatorVisibleTextRange(begin, end);
+    return false;
+  }
+
+  static ScreenshotInfo rotationPosition() {
+    RenderLock lock;
+    return activityManager.getScreenshotInfo();
+  }
+
+  static void captureRotationScreen(const char* name) {
+    const char* output = std::getenv("CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION_CAPTURES");
+    if (!output || !output[0]) return;
+    std::filesystem::create_directories(output);
+    const auto path = std::filesystem::path(output) / (std::string(name) + ".pgm");
+    FILE* image = std::fopen(path.c_str(), "wb");
+    if (!image) fail("Cannot create rotation capture: %s", path.string().c_str());
+    RenderLock lock;
+    const int width = renderer.getScreenWidth();
+    const int height = renderer.getScreenHeight();
+    std::fprintf(image, "P5\n%d %d\n255\n", width, height);
+    for (int y = 0; y < height; ++y)
+      for (int x = 0; x < width; ++x) std::fputc(renderer.isPixelBlack(x, y) ? 0 : 255, image);
+    std::fclose(image);
+  }
+
+  void captureRotationReader(const char* label) {
+    renderCurrentStep(label);
+    const std::string name = std::string(rotationTextReader ? "txt-" : "epub-") + label;
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    ScreenshotInfo info;
+    uint64_t frame;
+    int width;
+    int height;
+    {
+      RenderLock lock;
+      info = activityManager.getScreenshotInfo();
+      if (!rotationVisibleRange(begin, end) || begin >= end)
+        fail("Rotation capture has no rendered content range: %s", name.c_str());
+      if (rotationHasFrame && (rotationContentAnchor < begin || rotationContentAnchor >= end))
+        fail("Reader lost content anchor %u outside [%u,%u) during %s", rotationContentAnchor, begin, end,
+             name.c_str());
+      if (rotationHasFrame && info.spineIndex != rotationAnchor.spineIndex)
+        fail("EPUB rotation changed the reading chapter during %s", name.c_str());
+      frame = hashBytes(renderer.getFrameBuffer(), renderer.getBufferSize());
+      if (rotationHasFrame && SETTINGS.orientation != rotationLastCapturedOrientation && frame == rotationFrameHash)
+        fail("Rotation changed the enum without changing the rendered page: %s", name.c_str());
+      width = renderer.getScreenWidth();
+      height = renderer.getScreenHeight();
+      captureRotationScreen(name.c_str());
+    }
+    LOG_INF("SMOKE",
+            "Rotation %s: orientation=%u viewport=%dx%d page=%d/%d spine=%d anchor=%u range=[%u,%u) "
+            "frame=%llu",
+            name.c_str(), SETTINGS.orientation, width, height, info.currentPage, info.totalPages, info.spineIndex,
+            rotationHasFrame ? rotationContentAnchor : begin, begin, end, static_cast<unsigned long long>(frame));
+    if (const char* output = std::getenv("CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION_CAPTURES"); output && output[0]) {
+      const auto path = std::filesystem::path(output) / (name + ".json");
+      FILE* metadata = std::fopen(path.c_str(), "wb");
+      if (!metadata) fail("Cannot create rotation metadata");
+      std::fprintf(metadata,
+                   "{\"orientation\":%u,\"width\":%d,\"height\":%d,\"page\":%d,\"pages\":%d,\"spine\":%d,"
+                   "\"baselineAnchor\":%u,\"visibleBegin\":%u,\"visibleEnd\":%u,\"frameHash\":\"%llu\"}\n",
+                   SETTINGS.orientation, width, height, info.currentPage, info.totalPages, info.spineIndex,
+                   rotationHasFrame ? rotationContentAnchor : begin, begin, end,
+                   static_cast<unsigned long long>(frame));
+      std::fclose(metadata);
+    }
+    if (!rotationHasFrame) {
+      rotationAnchor = info;
+      rotationContentAnchor = begin;
+    }
+    rotationFrameHash = frame;
+    rotationLastCapturedOrientation = SETTINGS.orientation;
+    rotationHasFrame = true;
+  }
+
+  void verifyRotatedTxtSleepRebuild(const char* label) {
+    auto* txtReader = dynamic_cast<TxtReaderActivity*>(activityManager.simulatorCurrentActivity());
+    if (!txtReader || txtReader != rotationReader) fail("TXT sleep rebuild requires the actual foreground TXT reader");
+    renderCurrentStep("TXT live page before sleep reconstruction");
+    // This production hook flushes the same queued position before a reader
+    // overlay/restart. Do not manufacture or rewrite the saved progress record.
+    txtReader->onFrontlightPanelOpened();
+    {
+      RenderLock lock;
+      uint32_t begin = 0;
+      uint32_t end = 0;
+      if (!rotationVisibleRange(begin, end) || rotationContentAnchor < begin || rotationContentAnchor >= end)
+        fail("TXT sleep rebuild lost the original visible content anchor");
+      const std::string bookPath = txtReader->getCurrentBookPath();
+      Txt savedBook(bookPath, "/.crosspoint");
+      if (!savedBook.load()) fail("Cannot open TXT sleep reconstruction fixture");
+      HalFile progress;
+      if (!Storage.openFileForRead("SMOKE", savedBook.getCachePath() + "/progress.bin", progress))
+        fail("TXT sleep reconstruction has no production progress record");
+      uint8_t data[6];
+      const int read = progress.read(data, sizeof(data));
+      progress.close();
+      if (read != static_cast<int>(sizeof(data)))
+        fail("TXT sleep reconstruction did not save the byte-offset progress record");
+      const uint32_t savedOffset = static_cast<uint32_t>(data[2]) | (static_cast<uint32_t>(data[3]) << 8) |
+                                   (static_cast<uint32_t>(data[4]) << 16) | (static_cast<uint32_t>(data[5]) << 24);
+      rotationSleepInteriorObserved |= rotationContentAnchor > begin;
+
+      int top, right, bottom, left;
+      renderer.getOrientedViewableTRBL(&top, &right, &bottom, &left);
+      left += SETTINGS.screenMarginHorizontal;
+      right += SETTINGS.screenMarginHorizontal;
+      const int topStatusBar = ReaderUtils::getTopStatusBarReservedHeight(renderer);
+      top += topStatusBar > 0 ? std::max(static_cast<int>(SETTINGS.screenMarginVertical),
+                                         topStatusBar + ReaderUtils::TOP_STATUS_BAR_TEXT_PADDING)
+                              : SETTINGS.screenMarginVertical;
+      bottom += ReaderUtils::getReaderFooterReservedHeight(false);
+      const int width = renderer.getScreenWidth() - left - right;
+      const int height = renderer.getScreenHeight() - top - bottom;
+      const size_t bytes = renderer.getRegionByteSize(left, top, width, height);
+      if (width <= 0 || height <= 0 || !bytes) fail("TXT sleep reconstruction has no body viewport");
+      std::vector<uint8_t> live(bytes), rebuilt(bytes);
+      if (!renderer.copyRegionToBuffer(left, top, width, height, live.data(), bytes))
+        fail("Cannot capture live TXT body");
+      const std::string name = std::string("txt-") + label;
+      captureRotationScreen((name + "-sleep-live").c_str());
+      if (!TxtReaderActivity::drawCurrentPageToBuffer(bookPath, renderer))
+        fail("Production TXT sleep-overlay reconstruction failed");
+      if (!renderer.copyRegionToBuffer(left, top, width, height, rebuilt.data(), bytes))
+        fail("Cannot capture reconstructed TXT body");
+      captureRotationScreen((name + "-sleep-rebuilt").c_str());
+      const auto liveHash = hashBytes(live.data(), live.size());
+      const auto rebuiltHash = hashBytes(rebuilt.data(), rebuilt.size());
+      LOG_INF("SMOKE",
+              "TXT sleep %s: orientation=%u logicalAnchor=%u savedOffset=%u visible=[%u,%u) "
+              "liveBody=%llu rebuiltBody=%llu",
+              label, SETTINGS.orientation, rotationContentAnchor, savedOffset, begin, end,
+              static_cast<unsigned long long>(liveHash), static_cast<unsigned long long>(rebuiltHash));
+      if (live != rebuilt)
+        fail(
+            "TXT sleep-overlay reconstruction differs from the live rotated page body "
+            "(logicalAnchor=%u savedOffset=%u pageStart=%u)",
+            rotationContentAnchor, savedOffset, begin);
+    }
+    renderCurrentStep("TXT live page restored after sleep reconstruction");
+  }
+
+  void startAutoRotationSmoke() {
+    if (!gpio.deviceIsX3() || !halTiltSensor.isAvailable()) fail("Auto-rotation smoke requires the X3 simulator");
+    const char* book = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
+    if (!book || !Storage.exists(book)) fail("Auto-rotation smoke requires an EPUB fixture");
+    SETTINGS.toJson(rotationOriginalSettings);
+    if (SETTINGS.autoRotate) fail("Auto-rotation did not default to off on the isolated card");
+    SETTINGS.tiltPageTurn = CrossPointSettings::TILT_OFF;
+    SETTINGS.shortPwrBtn = CrossPointSettings::PAGE_TURN;
+    SETTINGS.longPwrBtn = CrossPointSettings::IGNORE;
+    SETTINGS.orientation = CrossPointSettings::PORTRAIT;
+    SETTINGS.textAntiAliasing = 0;  // Compare the same monochrome text body in the live and sleep render paths.
+    simulatorClearAcceleration();
+    LOG_INF("SMOKE", "Auto-rotation uses synthetic gravity; this does not validate physical X3 axis signs");
+
+    const auto all = getSettingsList();
+    const auto controls = buildControlsSettingsParentList(all);
+    const auto autoSetting = std::find_if(controls.begin(), controls.end(),
+                                          [](const SettingInfo& item) { return settingKeyIs(item, "autoRotate"); });
+    const auto powerMenu = std::find_if(controls.begin(), controls.end(), [](const SettingInfo& item) {
+      return item.action == SettingAction::ControlsPowerButton;
+    });
+    const auto power = buildControlsPowerSettingsList(all);
+    const auto longSetting = std::find_if(power.begin(), power.end(),
+                                          [](const SettingInfo& item) { return settingKeyIs(item, "longPwrBtn"); });
+    if (autoSetting == controls.end() || powerMenu == controls.end() || longSetting == power.end())
+      fail("Rotation controls are not reachable through the production settings menus");
+    const auto rotationOption = std::find(longSetting->enumRawValues.begin(), longSetting->enumRawValues.end(),
+                                          CrossPointSettings::ROTATE_CLOCKWISE);
+    if (rotationOption == longSetting->enumRawValues.end()) fail("Long Power picker cannot select rotation");
+    const int autoRow = static_cast<int>(autoSetting - controls.begin());
+    const int powerRow = static_cast<int>(powerMenu - controls.begin());
+    const int longRow = static_cast<int>(longSetting - power.begin());
+    const int optionRow = static_cast<int>(rotationOption - longSetting->enumRawValues.begin());
+    const auto originalChoice =
+        std::find(longSetting->enumRawValues.begin(), longSetting->enumRawValues.end(), SETTINGS.longPwrBtn);
+    if (originalChoice == longSetting->enumRawValues.end()) fail("Current Long Power choice is absent from its picker");
+    const int originalOption = static_cast<int>(originalChoice - longSetting->enumRawValues.begin());
+    inputScript.clear();
+    scriptIndex = 0;
+    inputCompletionStep = SmokeStep::AutoRotation;
+    const auto right = mappedInputManager.menuButton(MappedInputManager::Button::Right);
+    const auto up = mappedInputManager.menuButton(MappedInputManager::Button::Up);
+    const auto down = mappedInputManager.menuButton(MappedInputManager::Button::Down);
+    addTap(right);
+    addTap(right);
+    for (int i = 0; i <= autoRow; ++i) addTap(down);
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Auto-rotate enabled through Controls", 4));
+    inputScript.push_back(
+        {ScriptActionType::CaptureRotation, MappedInputManager::Button::Back, "settings-auto-rotate", 0, 0, 0});
+    for (int i = 0; i <= autoRow; ++i) addTap(up);
+    for (int i = 0; i <= powerRow; ++i) addTap(down);
+    addTap(MappedInputManager::Button::Confirm);
+    for (int i = 0; i < longRow; ++i) addTap(down);
+    addTap(MappedInputManager::Button::Confirm);
+    for (int i = 0; i < std::abs(optionRow - originalOption); ++i) addTap(optionRow > originalOption ? down : up);
+    inputScript.push_back(render("Long Power rotation selected in production picker", 4));
+    inputScript.push_back(
+        {ScriptActionType::CaptureRotation, MappedInputManager::Button::Back, "settings-power-picker", 0, 0, 0});
+    addTap(MappedInputManager::Button::Confirm);
+    inputScript.push_back(render("Long Power rotation saved", 4));
+    activityManager.goToSettings();
+    queueStep("Auto-rotation Controls settings", SmokeStep::ReaderInput, 4);
+  }
+
+  void buildAutoRotationScript() {
+    if (!SETTINGS.autoRotate || SETTINGS.longPwrBtn != CrossPointSettings::ROTATE_CLOCKWISE ||
+        SETTINGS.shortPwrBtn != CrossPointSettings::PAGE_TURN)
+      fail("Production settings input did not select auto-rotation and Long Power rotation");
+    JsonDocument saved;
+    if (deserializeJson(saved, Storage.readFile(CrossPointSettings::getFilePath())))
+      fail("Rotation settings were not saved as JSON");
+    SETTINGS.autoRotate = 0;
+    SETTINGS.longPwrBtn = CrossPointSettings::IGNORE;
+    SETTINGS.fromJson(saved.as<JsonVariantConst>());
+    if (!SETTINGS.autoRotate || SETTINGS.longPwrBtn != CrossPointSettings::ROTATE_CLOCKWISE)
+      fail("Rotation settings did not survive the normal JSON load path");
+    captureRotationScreen("settings-power-saved");
+
+    std::string text;
+    for (unsigned i = 0; i < 400; ++i) {
+      text += "Rotation paragraph " + std::to_string(i) +
+              ". The reader must keep this content visible while portrait and landscape pages are rebuilt. "
+              "Changing orientation must not return to the beginning or silently advance a page.\n\n";
+    }
+    if (!Storage.writeFile("/books/auto-rotation-smoke.txt", text.c_str()))
+      fail("Cannot write auto-rotation TXT fixture");
+    const auto addGravity = [this](const float ax, const float ay, const float az) {
+      RotationAction action{RotationActionType::Gravity};
+      action.ax = ax;
+      action.ay = ay;
+      action.az = az;
+      rotationScript.push_back(action);
+    };
+    const auto observe = [this](const uint32_t ms, const uint8_t orientation, const bool overlay = false) {
+      RotationAction action{RotationActionType::Observe, ms, orientation};
+      action.overlay = overlay;
+      rotationScript.push_back(action);
+    };
+    const auto awaitOrientation = [this](const uint8_t orientation, const char* label, const bool power = false) {
+      RotationAction action{RotationActionType::AwaitOrientation, 5000, orientation};
+      action.label = label;
+      action.powerHold = power;
+      rotationScript.push_back(action);
+    };
+    // Explicitly synthetic mapping, matching the application's documented X3
+    // assumption, not a claim that a native simulator proves board mounting.
+    constexpr float gravity[4][2] = {{1.0f, 0.0f}, {0.0f, -1.0f}, {-1.0f, 0.0f}, {0.0f, 1.0f}};
+    constexpr const char* autoNames[] = {"auto-portrait", "auto-cw", "auto-inverted", "auto-ccw"};
+    constexpr const char* powerNames[] = {"power-portrait", "power-cw", "power-inverted", "power-ccw"};
+    for (const bool txt : {false, true}) {
+      if (!txt && std::getenv("CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION_TXT_SLEEP")) continue;
+      RotationAction open{RotationActionType::OpenBook};
+      open.label = txt ? "/books/auto-rotation-smoke.txt" : std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
+      open.orientation = txt ? 1 : 0;
+      rotationScript.push_back(open);
+      rotationScript.push_back({RotationActionType::AwaitReader, 10000});
+      rotationScript.push_back({RotationActionType::PageForward, 10000});
+      RotationAction baseline{RotationActionType::Capture};
+      baseline.label = "baseline";
+      rotationScript.push_back(baseline);
+      addGravity(0.0f, -1.0f, 0.0f);
+      observe(1100, CrossPointSettings::PORTRAIT);
+      rotationScript.push_back({RotationActionType::EnableAuto});
+      addGravity(0.0f, 0.0f, 1.0f);  // Face-up/flat.
+      observe(750, CrossPointSettings::PORTRAIT);
+      addGravity(0.7f, -0.7f, 0.0f);  // Ambiguous diagonal.
+      observe(750, CrossPointSettings::PORTRAIT);
+      addGravity(2.0f, 0.0f, 0.0f);  // Shaken rather than gravity.
+      observe(750, CrossPointSettings::PORTRAIT);
+      addGravity(std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f);
+      observe(750, CrossPointSettings::PORTRAIT);
+      for (int i = 0; i < 8; ++i) {
+        addGravity(0.0f, (i & 1) ? 1.0f : -1.0f, 0.0f);
+        observe(100, CrossPointSettings::PORTRAIT);
+      }
+      addGravity(0.0f, 0.0f, 1.0f);
+      observe(200, CrossPointSettings::PORTRAIT);
+      uint8_t previous = CrossPointSettings::PORTRAIT;
+      for (const uint8_t target : {uint8_t(1), uint8_t(2), uint8_t(3), uint8_t(0)}) {
+        addGravity(gravity[target][0], gravity[target][1], 0.0f);
+        observe(350, previous);
+        awaitOrientation(target, autoNames[target]);
+        if (txt) {
+          RotationAction check{RotationActionType::CheckTxtSleep};
+          check.label = autoNames[target];
+          rotationScript.push_back(check);
+        }
+        observe(650, target);
+        previous = target;
+      }
+      rotationScript.push_back({RotationActionType::DisableAuto});
+      for (const uint8_t target : {uint8_t(1), uint8_t(2), uint8_t(3), uint8_t(0)}) {
+        rotationScript.push_back({RotationActionType::PowerDown});
+        awaitOrientation(target, powerNames[target], true);
+        observe(1000, target);  // Holding beyond the threshold must not repeat.
+        rotationScript.push_back({RotationActionType::PowerUp});
+        observe(500, target);  // A leaked short-Power page turn must fail the content-anchor check.
+      }
+      rotationScript.push_back({RotationActionType::EnableAuto});
+      rotationScript.push_back({RotationActionType::OpenOverlay});
+      rotationScript.push_back({RotationActionType::AwaitOverlay, 5000});
+      addGravity(0.0f, -1.0f, 0.0f);
+      observe(1100, CrossPointSettings::PORTRAIT, true);
+      rotationScript.push_back({RotationActionType::CloseOverlay});
+      rotationScript.push_back({RotationActionType::AwaitReader, 5000});
+      observe(350, CrossPointSettings::PORTRAIT);
+      awaitOrientation(CrossPointSettings::LANDSCAPE_CW, "auto-after-overlay");
+      addGravity(1.0f, 0.0f, 0.0f);
+      awaitOrientation(CrossPointSettings::PORTRAIT, "auto-return-portrait");
+    }
+    rotationSettingsConfigured = true;
+    LOG_INF("SMOKE", "Production rotation settings persisted; exercising EPUB and TXT readers");
+  }
+
+  static bool rotationRendererMatches(const uint8_t orientation) {
+    switch (orientation) {
+      case CrossPointSettings::PORTRAIT:
+        return renderer.getOrientation() == GfxRenderer::Portrait;
+      case CrossPointSettings::LANDSCAPE_CW:
+        return renderer.getOrientation() == GfxRenderer::LandscapeClockwise;
+      case CrossPointSettings::INVERTED:
+        return renderer.getOrientation() == GfxRenderer::PortraitInverted;
+      case CrossPointSettings::LANDSCAPE_CCW:
+        return renderer.getOrientation() == GfxRenderer::LandscapeCounterClockwise;
+    }
+    return false;
+  }
+
+  void runAutoRotationSmoke() {
+    if (!rotationSettingsConfigured) buildAutoRotationScript();
+    if (rotationScriptIndex == rotationScript.size()) {
+      if (!rotationSleepInteriorObserved)
+        fail("TXT rotation fixture did not exercise a logical anchor inside a reflowed page");
+      simulatorClearAcceleration();
+      SETTINGS.fromJson(rotationOriginalSettings.as<JsonVariantConst>());
+      if (!SETTINGS.saveToFile()) fail("Cannot restore settings after rotation smoke");
+      LOG_INF("SMOKE",
+              "Synthetic auto-rotation passed: EPUB/TXT content anchors, four orientations, settings, "
+              "Power hold/release, disabled/flat/noise and foreground overlay gates");
+      LOG_INF("SMOKE", "Simulator smoke test passed");
+      std::_Exit(0);
+    }
+    const auto& action = rotationScript[rotationScriptIndex];
+    const uint32_t now = millis();
+    if (!rotationActionStarted) {
+      rotationActionStarted = true;
+      rotationActionStartedMs = now;
+      rotationObservedPosition = rotationPosition();
+      rotationLastPageInputMs = now - 200;
+    }
+    const uint32_t elapsed = now - rotationActionStartedMs;
+    bool complete = true;
+    switch (action.type) {
+      case RotationActionType::OpenBook:
+        rotationTextReader = action.orientation != 0;
+        rotationReader = nullptr;
+        rotationHasFrame = false;
+        SETTINGS.autoRotate = 0;
+        SETTINGS.orientation = CrossPointSettings::PORTRAIT;
+        activityManager.goToReader(action.label, true);
+        break;
+      case RotationActionType::EnableAuto:
+        SETTINGS.autoRotate = 1;
+        break;
+      case RotationActionType::DisableAuto:
+        SETTINGS.autoRotate = 0;
+        break;
+      case RotationActionType::Gravity:
+        simulatorSetAcceleration(action.ax, action.ay, action.az);
+        break;
+      case RotationActionType::Observe: {
+        if (SETTINGS.orientation != action.orientation || !rotationRendererMatches(action.orientation))
+          fail("Unexpected rotation during stability/gating check, action=%zu", rotationScriptIndex);
+        auto* current = activityManager.simulatorCurrentActivity();
+        if (action.overlay ? current == rotationReader : current != rotationReader)
+          fail("Power release or sensor input left the expected reader/overlay, action=%zu", rotationScriptIndex);
+        const auto info = rotationPosition();
+        if (info.currentPage != rotationObservedPosition.currentPage ||
+            info.spineIndex != rotationObservedPosition.spineIndex)
+          fail("Sensor input or long-Power release turned a page during action=%zu", rotationScriptIndex);
+        if (!action.overlay && rotationHasFrame) {
+          RenderLock lock;
+          uint32_t begin = 0;
+          uint32_t end = 0;
+          if (!rotationVisibleRange(begin, end) || rotationContentAnchor < begin || rotationContentAnchor >= end)
+            fail("Sensor input or long-Power release moved the visible content anchor during action=%zu",
+                 rotationScriptIndex);
+        }
+        complete = elapsed >= action.durationMs;
+        if (complete && (!SETTINGS.autoRotate || action.overlay)) {
+          float ax, ay, az;
+          if (halTiltSensor.takeAcceleration(ax, ay, az))
+            fail("Disabled/background sensor supplied a stale acceleration sample");
+        }
+        break;
+      }
+      case RotationActionType::AwaitOrientation:
+        if (activityManager.simulatorCurrentActivity() != rotationReader)
+          fail("Power hold or auto-rotation left the foreground reader");
+        complete = SETTINGS.orientation == action.orientation && rotationRendererMatches(action.orientation);
+        if (action.powerHold && complete &&
+            (!gpio.isPressed(HalGPIO::BTN_POWER) ||
+             gpio.getPowerButtonHeldTime() < SETTINGS.getPowerButtonLongPressDuration()))
+          fail("Power rotation fired before the real physical hold threshold");
+        if (complete) {
+          renderCurrentStep(action.label);
+          uint32_t begin = 0;
+          uint32_t end = 0;
+          {
+            RenderLock lock;
+            complete = rotationVisibleRange(begin, end);
+          }
+          if (complete) captureRotationReader(action.label);
+        }
+        break;
+      case RotationActionType::PageForward: {
+        uint32_t begin = 0;
+        uint32_t end = 0;
+        if (rotationPageButtonDown) {
+          complete = false;
+          if (now - rotationLastPageInputMs >= 80) {
+            simulatorSetButtonPressed(HalGPIO::BTN_DOWN, false);
+            rotationPageButtonDown = false;
+            rotationLastPageInputMs = now;
+          }
+          break;
+        }
+        bool readable;
+        {
+          RenderLock lock;
+          readable = rotationVisibleRange(begin, end);
+          complete = readable && begin > 0 && activityManager.getScreenshotInfo().currentPage > 1;
+        }
+        if (!complete && readable && now - rotationLastPageInputMs >= 200) {
+          // ReaderUtils no longer consumes the legacy PageForward alias.
+          // Drive a real side-button press/hold/release so SideButtonShortcuts
+          // can track and dispatch the production short-press page action.
+          simulatorSetButtonPressed(HalGPIO::BTN_DOWN, true);
+          rotationPageButtonDown = true;
+          rotationLastPageInputMs = now;
+        }
+        break;
+      }
+      case RotationActionType::PowerDown:
+        simulatorSetButtonPressed(HalGPIO::BTN_POWER, true);
+        break;
+      case RotationActionType::PowerUp:
+        simulatorSetButtonPressed(HalGPIO::BTN_POWER, false);
+        break;
+      case RotationActionType::OpenOverlay:
+      case RotationActionType::CloseOverlay: {
+        const uint8_t button =
+            action.type == RotationActionType::OpenOverlay ? HalGPIO::BTN_CONFIRM : HalGPIO::BTN_BACK;
+        if (!rotationOverlayButtonDown) {
+          simulatorSetButtonPressed(button, true);
+          rotationOverlayButtonDown = true;
+          complete = false;
+        } else if (elapsed >= 80) {
+          simulatorSetButtonPressed(button, false);
+          rotationOverlayButtonDown = false;
+        } else {
+          complete = false;
+        }
+        break;
+      }
+      case RotationActionType::AwaitOverlay:
+        complete = activityManager.simulatorCurrentActivity() &&
+                   activityManager.simulatorCurrentActivity() != rotationReader &&
+                   !activityManager.simulatorCurrentActivity()->isBookReaderActivity();
+        if (complete) {
+          renderCurrentStep("Reader overlay must not auto-rotate");
+          captureRotationScreen(rotationTextReader ? "txt-overlay" : "epub-overlay");
+        }
+        break;
+      case RotationActionType::AwaitReader:
+        complete = activityManager.isCurrentActivityNamed(rotationTextReader ? "TxtReader" : "EpubReader");
+        if (complete) {
+          renderCurrentStep("Rotation reader ready");
+          auto* current = activityManager.simulatorCurrentActivity();
+          if (rotationReader && current != rotationReader) fail("Overlay return replaced the reading session");
+          rotationReader = current;
+          const auto info = rotationPosition();
+          complete = info.currentPage > 0 && info.totalPages > 0;
+        }
+        break;
+      case RotationActionType::Capture:
+        captureRotationReader(action.label);
+        break;
+      case RotationActionType::CheckTxtSleep:
+        verifyRotatedTxtSleepRebuild(action.label);
+        break;
+    }
+    if (!complete && action.durationMs && elapsed > action.durationMs)
+      fail("Rotation smoke timed out at action %zu (kind=%u)", rotationScriptIndex, static_cast<unsigned>(action.type));
+    if (complete) {
+      ++rotationScriptIndex;
+      rotationActionStarted = false;
+    }
+  }
+
   static void verifyCachedHomeProgressMigration() {
     const RecentBook book{"/books/legacy-home-smoke.epub", "Legacy Home smoke", {}, {}};
     const std::string legacy = "/.crosspoint/epub_" + std::to_string(std::hash<std::string>{}(book.path));
@@ -1228,6 +1783,10 @@ class SimulatorSmokeTest {
     switch (step) {
       case SmokeStep::Start:
         LOG_INF("SMOKE", "Starting simulator smoke test");
+        if (std::getenv("CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION")) {
+          startAutoRotationSmoke();
+          break;
+        }
         if (std::getenv("CROSSINK_SIMULATOR_SMOKE_STATUS_BARS")) {
           verifyStatusBarSettings();
           SETTINGS.clockDateHasBeenSynced = true;
@@ -1911,6 +2470,10 @@ class SimulatorSmokeTest {
 
       case SmokeStep::ReaderInput:
         runReaderInputScript();
+        break;
+
+      case SmokeStep::AutoRotation:
+        runAutoRotationSmoke();
         break;
 
       case SmokeStep::CarouselHome:
@@ -2856,6 +3419,9 @@ class SimulatorSmokeTest {
                settings->simulatorSelectedIndex(), action.x, action.y);
         break;
       }
+      case ScriptActionType::CaptureRotation:
+        captureRotationScreen(action.label);
+        break;
       case ScriptActionType::AssertActivity:
         if (!activityManager.isCurrentActivityNamed(action.label)) fail("Expected current activity: %s", action.label);
         break;

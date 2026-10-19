@@ -130,6 +130,9 @@ class EpubReaderActivity final : public Activity {
   int cachedChapterPageNumber = 0;
   int cachedChapterTotalPageCount = 0;
   std::optional<uint32_t> cachedVisibleTextOffset;
+  // Keep one logical position through repeated orientation-only reflows.
+  std::optional<uint32_t> rotationVisibleTextOffset;
+  int rotationAnchorSpineIndex = -1;
   struct ChapterGroupEstimateCache {
     int currentSpineIndex = -1;
     int firstSpineIndex = -1;
@@ -453,6 +456,8 @@ class EpubReaderActivity final : public Activity {
   // Opens the reader menu for the current position (short-press Confirm)
   void openReaderMenu();
   void applyOrientation(uint8_t orientation);
+  void applyOrientation(uint8_t orientation, RenderLock&& lock);
+  bool applyAutoRotation();
   void requestManualPageTurn(bool isForwardTurn, const char* source);
   bool drainPendingManualPageTurn();
   void clearPendingManualPageTurns(bool requestRecoveryRedraw = true);
@@ -495,6 +500,27 @@ class EpubReaderActivity final : public Activity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&& lock) override;
+#ifdef SIMULATOR
+  // Caller owns RenderLock. The final spine page has an open-ended upper bound.
+  bool simulatorVisibleTextRange(uint32_t& begin, uint32_t& end) const {
+    if (!section || pendingRelayoutReposition || pendingPercentJump || pendingPageJump || section->currentPage < 0 ||
+        section->currentPage >= section->pageCount) {
+      return false;
+    }
+    const auto offset = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(section->currentPage));
+    if (!offset) return false;
+    begin = *offset;
+    if (section->currentPage + 1 < section->pageCount) {
+      const auto next = section->getVisibleTextOffsetForPage(static_cast<uint16_t>(section->currentPage + 1));
+      if (!next) return false;
+      end = *next;
+    } else {
+      if (section->isBuilding() || section->isPartial()) return false;
+      end = UINT32_MAX;
+    }
+    return begin < end;
+  }
+#endif
   bool handleTwoFingerSwipeAction(CrossPointSettings::TWO_FINGER_SWIPE_ACTION action) override;
   bool handleTwoFingerRotation(bool clockwise) override;
   bool prepareManualRefresh() override {
@@ -521,6 +547,7 @@ class EpubReaderActivity final : public Activity {
   }
   bool isReaderActivity() const override { return true; }
   bool isBookReaderActivity() const override { return true; }
+  bool supportsAutoRotation() const override { return true; }
   bool isEpubReaderActivity() const override { return true; }
   void onInputLockChanged(bool locked) override;
   void onUserInput() override;

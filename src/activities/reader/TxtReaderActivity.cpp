@@ -118,6 +118,9 @@ void drawToast(const GfxRenderer& renderer, const char* msg) {
 
 void TxtReaderActivity::onEnter() {
   Activity::onEnter();
+  ReaderUtils::resetAutoRotation();
+  pendingOrientationOffset.reset();
+  rotationReadingOffset.reset();
 
   if (!txt) {
     return;
@@ -147,6 +150,7 @@ void TxtReaderActivity::onEnter() {
 }
 
 void TxtReaderActivity::onExit() {
+  ReaderUtils::resetAutoRotation();
   mappedInput.setReaderTouchscreenOverride(false);
   Activity::onExit();
   if (auto* fontCache = renderer.getFontCacheManager()) {
@@ -198,7 +202,10 @@ bool TxtReaderActivity::handleFrontlightPanelResult(const FrontlightPanelResult&
 }
 
 void TxtReaderActivity::loop() {
-  if (quickActionsPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+  if (quickActionsPopup.handleInput(mappedInput, [this] { requestUpdate(); })) {
+    ReaderUtils::resetAutoRotation();
+    return;
+  }
 #if CROSSINK_APP_CAP_TOUCH
   if (handlePinchFontResize()) return;
 #endif
@@ -283,6 +290,7 @@ void TxtReaderActivity::loop() {
         case CrossPointSettings::PAGE_TURN:
           if (currentPage < totalPages - 1) {
             currentPage++;
+            rotationReadingOffset.reset();
             requestUpdate();
           }
           break;
@@ -354,15 +362,18 @@ void TxtReaderActivity::loop() {
   (void)fromSideBtn;
   (void)fromTilt;
   if (!prevTriggered && !nextTriggered) {
+    applyAutoRotation();
     return;
   }
 
   if (prevTriggered && currentPage > 0) {
     currentPage--;
+    rotationReadingOffset.reset();
     requestUpdate();
   } else if (nextTriggered) {
     if (currentPage < totalPages - 1) {
       currentPage++;
+      rotationReadingOffset.reset();
       requestUpdate();
     }
   }
@@ -389,6 +400,7 @@ void TxtReaderActivity::rebuildTextLayout() {
   sdFontSystem.ensureLoaded(renderer);
   {
     RenderLock lock(*this);
+    rotationReadingOffset.reset();
     pageOffsets.clear();
     currentPageLines.clear();
     initialized = false;
@@ -440,17 +452,55 @@ bool TxtReaderActivity::handleTwoFingerRotation(const bool clockwise) {
 }
 
 bool TxtReaderActivity::applyReaderOrientation(const uint8_t orientation) {
-  SETTINGS.orientation = orientation;
-  SETTINGS.saveToFile();
-  {
-    RenderLock lock(*this);
-    ReaderUtils::applyOrientation(renderer, SETTINGS.orientation);
+  RenderLock lock(*this);
+  return applyReaderOrientation(orientation, std::move(lock));
+}
+
+bool TxtReaderActivity::applyReaderOrientation(const uint8_t orientation, RenderLock&&) {
+  ReaderUtils::resetAutoRotation();
+  const bool settingsChanged = SETTINGS.orientation != orientation;
+  const bool rendererChanged = renderer.getOrientation() != ReaderUtils::toRendererOrientation(orientation);
+  if (!settingsChanged && !rendererChanged) return true;
+
+  if (rendererChanged && initialized && !pendingOrientationOffset && currentPage >= 0 &&
+      currentPage < static_cast<int>(pageOffsets.size())) {
+    const size_t pageBegin = pageOffsets[currentPage];
+    const size_t pageEnd =
+        currentPage + 1 < static_cast<int>(pageOffsets.size()) ? pageOffsets[currentPage + 1] : txt->getFileSize();
+    if (!rotationReadingOffset || *rotationReadingOffset < pageBegin || *rotationReadingOffset >= pageEnd) {
+      rotationReadingOffset = pageBegin;
+    }
+    pendingOrientationOffset = rotationReadingOffset;
+    if (!saveProgress(currentPage)) LOG_ERR("TRS", "Failed to save progress before orientation change");
+  }
+  if (settingsChanged) {
+    SETTINGS.orientation = orientation;
+    SETTINGS.saveToFile();
+  }
+  if (rendererChanged) {
+    ReaderUtils::applyOrientation(renderer, orientation);
     pageOffsets.clear();
     currentPageLines.clear();
     initialized = false;
   }
   requestUpdate();
   return true;
+}
+
+bool TxtReaderActivity::applyAutoRotation() {
+  if (!SETTINGS.autoRotate) {
+    ReaderUtils::resetAutoRotation();
+    return false;
+  }
+  RenderLock lock(*this, RenderLock::Mode::Try);
+  if (!lock.ownsLock() || !txt || !initialized || pendingOrientationOffset || pageOffsets.empty() ||
+      quickActionsPopup.isActive()) {
+    ReaderUtils::resetAutoRotation();
+    return false;
+  }
+  uint8_t targetOrientation;
+  if (!ReaderUtils::takeAutoRotation(mappedInput, targetOrientation)) return false;
+  return applyReaderOrientation(targetOrientation, std::move(lock));
 }
 
 void TxtReaderActivity::toggleDarkMode() {
@@ -465,7 +515,7 @@ bool TxtReaderActivity::consumeLongPowerButtonRelease() {
   }
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Power) ||
-      !mappedInput.isPressed(MappedInputManager::Button::Power)) {
+      !mappedInput.isPhysicalPressed(MappedInputManager::Button::Power)) {
     longPowerButtonHandled = false;
     return true;
   }
@@ -510,9 +560,12 @@ bool TxtReaderActivity::executeReaderShortcutAction(const CrossPointSettings::SH
     case CrossPointSettings::SHORT_PWRBTN::PREVIOUS_PAGE:
       if (currentPage > 0) {
         currentPage--;
+        rotationReadingOffset.reset();
         requestUpdate();
       }
       return true;
+    case CrossPointSettings::SHORT_PWRBTN::ROTATE_CLOCKWISE:
+      return applyReaderOrientation(ReaderUtils::rotatedOrientation(SETTINGS.orientation, true));
     case CrossPointSettings::SHORT_PWRBTN::TOGGLE_FONT:
       cycleReaderFont();
       return true;
@@ -693,8 +746,13 @@ void TxtReaderActivity::initializeReader() {
     savePageIndexCache();
   }
 
-  // Load saved progress
-  loadProgress();
+  if (pendingOrientationOffset && !pageOffsets.empty()) {
+    const auto nextPage = std::upper_bound(pageOffsets.begin(), pageOffsets.end(), *pendingOrientationOffset);
+    currentPage = std::max(0, static_cast<int>(nextPage - pageOffsets.begin()) - 1);
+    pendingOrientationOffset.reset();
+  } else {
+    loadProgress();
+  }
 
   initialized = true;
 }
@@ -941,13 +999,15 @@ bool TxtReaderActivity::saveProgress(const int page) {
   if (!txt) {
     return false;
   }
+  // A pending relayout has no page starts yet. Retain the last valid record.
+  if (page < 0 || page >= static_cast<int>(pageOffsets.size())) return true;
   HalFile f;
   if (!Storage.openFileForWrite("TRS", txt->getCachePath() + "/progress.bin", f)) {
     return false;
   }
-  // 6-byte format: page(2 bytes LE) + file offset(4 bytes LE)
-  // The offset lets drawCurrentPageToBuffer render without requiring index.bin.
-  const size_t offset = (page >= 0 && page < static_cast<int>(pageOffsets.size())) ? pageOffsets[page] : 0;
+  // 6-byte format: page(2 bytes LE) + exact page-start offset(4 bytes LE).
+  // Sleep reconstruction starts rendering here, not at the interior rotation anchor.
+  const size_t offset = pageOffsets[page];
   uint8_t data[6];
   data[0] = page & 0xFF;
   data[1] = (page >> 8) & 0xFF;
@@ -961,12 +1021,15 @@ bool TxtReaderActivity::saveProgress(const int page) {
     LOG_ERR("TRS", "Short write saving reader progress");
     return false;
   }
-  progressSaveDebouncer.markPersisted(static_cast<uint32_t>(page));
+  progressSaveDebouncer.markPersisted(static_cast<uint32_t>(page), static_cast<uint32_t>(offset));
   return true;
 }
 
 bool TxtReaderActivity::queueProgressSave() {
-  if (!progressSaveDebouncer.observe(static_cast<uint32_t>(currentPage))) {
+  if (currentPage < 0 || currentPage >= static_cast<int>(pageOffsets.size())) return true;
+  // Reflow can move a page start without changing its page number.
+  if (!progressSaveDebouncer.observe(static_cast<uint32_t>(currentPage),
+                                     static_cast<uint32_t>(pageOffsets[currentPage]))) {
     return true;
   }
   return saveProgress(currentPage);
@@ -980,15 +1043,20 @@ bool TxtReaderActivity::flushQueuedProgress() {
 void TxtReaderActivity::loadProgress() {
   HalFile f;
   if (Storage.openFileForRead("TRS", txt->getCachePath() + "/progress.bin", f)) {
-    uint8_t data[4];
-    if (f.read(data, 4) == 4) {
+    uint8_t data[6];
+    const auto bytesRead = f.read(data, sizeof(data));
+    if (bytesRead >= 4) {
       currentPage = data[0] + (data[1] << 8);
-      if (currentPage >= totalPages) {
-        currentPage = totalPages - 1;
+      if (bytesRead == sizeof(data) && !pageOffsets.empty()) {
+        const uint32_t offset = static_cast<uint32_t>(data[2]) | (static_cast<uint32_t>(data[3]) << 8) |
+                                (static_cast<uint32_t>(data[4]) << 16) | (static_cast<uint32_t>(data[5]) << 24);
+        if (offset < txt->getFileSize()) {
+          const auto nextPage = std::upper_bound(pageOffsets.begin(), pageOffsets.end(), offset);
+          currentPage = std::max(0, static_cast<int>(nextPage - pageOffsets.begin()) - 1);
+          rotationReadingOffset = offset;
+        }
       }
-      if (currentPage < 0) {
-        currentPage = 0;
-      }
+      currentPage = std::clamp(currentPage, 0, std::max(0, totalPages - 1));
     }
     f.close();
   }

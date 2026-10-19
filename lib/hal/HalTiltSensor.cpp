@@ -2,18 +2,16 @@
 
 #include <Logging.h>
 
+#include <cmath>
+
 HalTiltSensor halTiltSensor;  // Singleton instance
 
-bool HalTiltSensor::readGyro(float& gx, float& gy, float& gz) const {
-  Imu::Sample sample;
-  if (!_sdkImu.read(sample)) return false;
-  gx = sample.gx;
-  gy = sample.gy;
-  gz = sample.gz;
-  return true;
-}
-
 void HalTiltSensor::begin() {
+  _isAwake = false;
+  _accelerationAvailable = false;
+  _inTilt = false;
+  clearPendingEvents();
+  _tiltWasEnabled = false;
 #ifdef FORCE_TILT_SENSOR_AVAILABLE
   _available = true;
   _isAwake = false;
@@ -27,8 +25,8 @@ void HalTiltSensor::begin() {
   if (_available) {
     _initMs = millis();
     _lastPollMs = millis();
-    // begin() leaves the sensors sampling; stand them by until tilt page turn
-    // actually wakes them, so a disabled IMU doesn't drain the battery.
+    // begin() leaves the sensors sampling; stand them by until a reader needs
+    // tilt page turns or auto-rotation, so a disabled IMU doesn't drain the battery.
     if (!_sdkImu.sleep()) {
       LOG_ERR("GYR", "IMU standby failed");
     }
@@ -39,6 +37,7 @@ void HalTiltSensor::begin() {
 }
 
 bool HalTiltSensor::wake() {
+  _accelerationAvailable = false;
   if (!_available) {
     return false;
   }
@@ -56,6 +55,10 @@ bool HalTiltSensor::wake() {
 }
 
 bool HalTiltSensor::deepSleep() {
+  _accelerationAvailable = false;
+  clearPendingEvents();
+  _inTilt = false;
+  _tiltWasEnabled = false;
   if (!_available) {
     return false;
   }
@@ -65,21 +68,32 @@ bool HalTiltSensor::deepSleep() {
     return false;
   }
 
-  clearPendingEvents();
-  _inTilt = false;
   _isAwake = false;
   return true;
 }
 
 void HalTiltSensor::update(const uint8_t enabled, const uint8_t direction, const uint8_t orientation,
-                           const bool inReader) {
+                           const bool inReader, const bool autoRotateEnabled) {
+  const bool tiltEnabled = (enabled != CrossPointTiltPageTurn::TILT_OFF) && inReader;
+  if (tiltEnabled && !_tiltWasEnabled) {
+    _lastTiltMs = millis();
+  }
+  _tiltWasEnabled = tiltEnabled;
+  if (!tiltEnabled) {
+    clearPendingEvents();
+    _inTilt = false;
+  }
+  if (!autoRotateEnabled || !inReader) {
+    _accelerationAvailable = false;
+  }
   if (!_available) {
+    _accelerationAvailable = false;
     return;
   }
 
-  const bool shouldBeAwake = (enabled != CrossPointTiltPageTurn::TILT_OFF) && inReader;
+  const bool shouldBeAwake = inReader && (tiltEnabled || autoRotateEnabled);
 
-  // State machine: keep the sensor awake only while tilt is enabled in a reader.
+  // Share the existing power state and polling cadence between both features.
   if (shouldBeAwake && !_isAwake) {
     _isAwake = wake();
     return;
@@ -103,11 +117,23 @@ void HalTiltSensor::update(const uint8_t enabled, const uint8_t direction, const
     return;
   }
   _lastPollMs = now;
+  _accelerationAvailable = false;
 
-  float gx, gy, gz;
-  if (!readGyro(gx, gy, gz)) {
+  Imu::Sample sample;
+  if (!_sdkImu.read(sample)) {
     return;
   }
+  if (autoRotateEnabled) {
+    _ax = sample.ax;
+    _ay = sample.ay;
+    _az = sample.az;
+    _accelerationAvailable = true;
+  }
+  if (!tiltEnabled) {
+    return;
+  }
+  const float gx = sample.gx;
+  const float gy = sample.gy;
 
   // Map the gyro axis to the selected gesture based on reader orientation.
   // On the X3 PCB: X axis = left/right in portrait, Y axis = left/right in landscape.
@@ -160,6 +186,20 @@ void HalTiltSensor::update(const uint8_t enabled, const uint8_t direction, const
       }
     }
   }
+}
+
+bool HalTiltSensor::takeAcceleration(float& ax, float& ay, float& az) {
+  if (!_accelerationAvailable) {
+    return false;
+  }
+  _accelerationAvailable = false;
+  if (!_available || !_isAwake || (millis() - _lastPollMs) > ACCELERATION_MAX_AGE_MS) {
+    return false;
+  }
+  ax = _ax;
+  ay = _ay;
+  az = _az;
+  return true;
 }
 
 bool HalTiltSensor::wasTiltedForward() {

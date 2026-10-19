@@ -42,6 +42,7 @@ This guide covers day-to-day device use. For focused reference material, see [Re
     - [Chapter Navigation](#chapter-navigation)
     - [Auto Page Turn](#auto-page-turn)
     - [Tilt Page Turn (X3 and Sticky)](#tilt-page-turn-x3-and-sticky)
+    - [Automatic Reading Orientation](#automatic-reading-orientation)
     - [Touch Reader Controls](#touch-reader-controls)
     - [Footnote Navigation](#footnote-navigation)
     - [System Navigation](#system-navigation)
@@ -378,6 +379,10 @@ which status-bar items are shown.
 
 - **Power Button**: Configure short-press and long-press actions independently. On supported devices, you can also configure the **Power + Up** shortcut.
 
+- **Auto-rotate (EPUB/TXT)**: On devices with a motion sensor, follow a stable
+  upright pose in the foreground EPUB/TXT reader. Off by default; ignores flat
+  and unstable poses. See [Automatic Reading Orientation](#automatic-reading-orientation).
+
 - **Front Buttons**: Configure front-button remapping, orientation awareness,
   reader-only long-press behavior, Back action, and Menu action.
 
@@ -398,6 +403,8 @@ which status-bar items are shown.
   - "Sleep" - Put the awake device to sleep without enabling short-press wake
   - "Wake" - When selected as **Short-press Action**, allow a short press to wake the device; does nothing while the device is awake
   - "Next Page" - Turn to the next page while reading
+  - "Rotate Page CW" - Rotate an EPUB/TXT page clockwise once per hold; available
+    only for the Power button's long-press action
   - "Toggle Bookmark", "Reading Stats", "Mark Finished", "Refresh", "Change Font", "Guide Dots", "Focus Reading", "Auto Page Turn", "Sync Progress", "File Transfer", "Calibre Wireless", "Join a Network", "Create Hotspot", "Screenshot", "Dark Mode", "Browse Files", "Library", or "Save Clipping" - Run the matching action
   - "Footnotes" - Select a footnote reference on the current page, with a list
     fallback when needed; see [Footnote Navigation](#footnote-navigation).
@@ -781,6 +788,20 @@ Auto Page Turn automatically advances pages at a set interval, useful for hands-
 ### Tilt Page Turn (X3 and Sticky)
 
 On the **Xteink X3** and **Sticky**, the gyroscope can be used to turn pages by tilting the device. This feature and its left-right or forward-back direction are available in **Settings -> Controls**.
+
+### Automatic Reading Orientation
+
+Enable **Settings > Controls > Auto-rotate (EPUB/TXT)** on sensor-equipped
+devices. A new upright orientation must remain stable for about half a second
+before the page reflows. The reading passage stays visible across portrait,
+landscape, and inverted orientations.
+
+Menus, locks, active button/touch interactions, and pre-rendered XTC pages do not
+auto-rotate. To rotate manually instead, assign **Rotate Page CW** under
+**Settings > Controls > Power Button > Long-press Action**. An enabled sensor
+mode can override that manual choice when the physical pose settles again.
+See [Controls](./controls.md#automatic-reading-orientation) for behavior and
+device-verification limits.
 
 ### Touch Reader Controls
 

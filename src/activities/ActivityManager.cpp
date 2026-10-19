@@ -1120,6 +1120,15 @@ bool ActivityManager::isReaderActivity() const {
                      [](const auto& activity) { return activity && activity->isReaderActivity(); });
 }
 
+bool ActivityManager::isActiveBookReaderActivity() const {
+  return currentActivity && currentActivity->isBookReaderActivity() && pendingAction == PendingAction::None;
+}
+
+bool ActivityManager::canAutoRotateReader() const {
+  return isActiveBookReaderActivity() && currentActivity->supportsAutoRotation() &&
+         !currentActivity->blocksGlobalInput();
+}
+
 bool ActivityManager::openReaderSettingsForTouchscreenEscapeHatch() {
   if (!mappedInput.hasTouchHardware() || !SETTINGS.disableReaderTouchscreen || !currentActivity ||
       !currentActivity->isReaderActivity() || pendingAction != PendingAction::None) {

@@ -516,7 +516,9 @@ inline uint8_t shortcutRawValue(const ShortcutOptionCatalog catalog, const Cross
 }
 
 inline void appendShortcutOptions(SettingInfo& setting, const ShortcutOptionCatalog catalog) {
-  const size_t extraOptions = catalog == ShortcutOptionCatalog::PowerButton ? 2 : 0;
+  const bool includeClockwiseRotation =
+      catalog == ShortcutOptionCatalog::PowerButton && settingKeyIs(setting, "longPwrBtn");
+  const size_t extraOptions = catalog == ShortcutOptionCatalog::PowerButton ? 2 + includeClockwiseRotation : 0;
   setting.enumValues.reserve(QuickActions::shortcutActionOrder.size() + 3 + extraOptions);
   setting.enumRawValues.reserve(QuickActions::shortcutActionOrder.size() + 3 + extraOptions);
 
@@ -543,6 +545,10 @@ inline void appendShortcutOptions(SettingInfo& setting, const ShortcutOptionCata
       setting.enumValues.push_back(StrId::STR_WAKE);
       setting.enumRawValues.push_back(CrossPointSettings::WAKE_ONLY);
     }
+  }
+  if (includeClockwiseRotation) {
+    setting.enumValues.push_back(StrId::STR_ROTATE_CW);
+    setting.enumRawValues.push_back(CrossPointSettings::ROTATE_CLOCKWISE);
   }
 }
 
@@ -586,7 +592,7 @@ inline SettingInfo buildSideButtonActionSetting(const StrId nameId, uint8_t Cros
 // can use it directly; mutable device UI lists use getSettingsList(), which
 // returns an owned copy and can add SD-card font and dictionary options.
 // Four edge gesture entries are compiled only for touch devices.
-inline constexpr size_t BASE_SETTINGS_CAPACITY = 104 + (CROSSINK_APP_CAP_TOUCH ? 4 : 0);
+inline constexpr size_t BASE_SETTINGS_CAPACITY = 106 + (CROSSINK_APP_CAP_TOUCH ? 4 : 0);
 
 const std::vector<SettingInfo>& getBaseSettingsList();
 
@@ -844,13 +850,15 @@ inline bool hasSideButtonChordSetting(const std::vector<SettingInfo>& allSetting
 inline std::vector<SettingInfo> buildControlsSettingsParentList(const std::vector<SettingInfo>& allSettings) {
   const bool hasTiltPageTurnSetting = hasSettingByName(allSettings, StrId::STR_TILT_PAGE_TURN);
   const bool hasTiltPageTurnDirectionSetting = hasSettingByName(allSettings, StrId::STR_TILT_PAGE_TURN_DIRECTION);
+  const bool hasAutoRotateSetting = hasSettingByName(allSettings, StrId::STR_AUTO_ROTATE);
   const bool hasTapsGestures = hasSettingByName(allSettings, StrId::STR_NEXT_PAGE);
   const bool hasFrontButtons = !gpio.hasTouch();
   const bool hasHomeKey = gpio.hasHomeKey();
 
   std::vector<SettingInfo> settings;
   settings.reserve(3 + (hasHomeKey ? 1u : 0u) + (hasFrontButtons ? 1u : 0u) + (hasTiltPageTurnSetting ? 1u : 0u) +
-                   (hasTiltPageTurnDirectionSetting ? 1u : 0u) + (hasTapsGestures ? 1u : 0u));
+                   (hasTiltPageTurnDirectionSetting ? 1u : 0u) + (hasAutoRotateSetting ? 1u : 0u) +
+                   (hasTapsGestures ? 1u : 0u));
   if (hasHomeKey) {
     settings.push_back(SettingInfo::Submenu(StrId::STR_HOME_BUTTON, SettingAction::ControlsHomeButton));
   }
@@ -865,6 +873,7 @@ inline std::vector<SettingInfo> buildControlsSettingsParentList(const std::vecto
   }
   if (hasTiltPageTurnSetting) addSettingByName(settings, allSettings, StrId::STR_TILT_PAGE_TURN);
   if (hasTiltPageTurnDirectionSetting) addSettingByName(settings, allSettings, StrId::STR_TILT_PAGE_TURN_DIRECTION);
+  if (hasAutoRotateSetting) addSettingByName(settings, allSettings, StrId::STR_AUTO_ROTATE);
   return settings;
 }
 

@@ -2,6 +2,7 @@
 
 #include <Txt.h>
 
+#include <optional>
 #include <vector>
 
 #include "CrossPointSettings.h"
@@ -39,6 +40,8 @@ class TxtReaderActivity final : public Activity {
   int linesPerPage = 0;
   int viewportWidth = 0;
   bool initialized = false;
+  std::optional<size_t> pendingOrientationOffset;
+  std::optional<size_t> rotationReadingOffset;
 
   // Cached settings for cache validation (different fonts/margins require re-indexing)
   int cachedFontId = 0;
@@ -78,6 +81,8 @@ class TxtReaderActivity final : public Activity {
   void rebuildTextLayout();
   void openReaderMenu();
   bool applyReaderOrientation(uint8_t orientation);
+  bool applyReaderOrientation(uint8_t orientation, RenderLock&& lock);
+  bool applyAutoRotation();
 #if CROSSINK_APP_CAP_TOUCH
   bool handlePinchFontResize();
   void resetPinchFontGesture();
@@ -95,6 +100,19 @@ class TxtReaderActivity final : public Activity {
   void loop() override;
   void render(RenderLock&&) override;
   bool handleTwoFingerSwipeAction(CrossPointSettings::TWO_FINGER_SWIPE_ACTION action) override;
+#ifdef SIMULATOR
+  // Caller owns RenderLock; offsets are [begin, end) in the text file.
+  bool simulatorVisibleTextRange(uint32_t& begin, uint32_t& end) const {
+    if (!txt || !initialized || pendingOrientationOffset || currentPage < 0 ||
+        currentPage >= static_cast<int>(pageOffsets.size())) {
+      return false;
+    }
+    begin = static_cast<uint32_t>(pageOffsets[currentPage]);
+    end = static_cast<uint32_t>(currentPage + 1 < static_cast<int>(pageOffsets.size()) ? pageOffsets[currentPage + 1]
+                                                                                       : txt->getFileSize());
+    return begin < end;
+  }
+#endif
   bool handleTwoFingerRotation(bool clockwise) override;
   bool prepareManualRefresh() override {
     pagesUntilFullRefresh = -1;
@@ -102,6 +120,7 @@ class TxtReaderActivity final : public Activity {
   }
   bool isReaderActivity() const override { return true; }
   bool isBookReaderActivity() const override { return true; }
+  bool supportsAutoRotation() const override { return true; }
   bool usesFullScreenReaderVerticalSwipes() const override {
 #if defined(FREEINK_DEVICE_STICKY) && FREEINK_DEVICE_STICKY
     return true;

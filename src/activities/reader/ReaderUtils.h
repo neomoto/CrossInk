@@ -14,6 +14,7 @@
 #include "MappedInputManager.h"
 #include "ReaderStatusBarTapTarget.h"
 #include "components/UITheme.h"
+#include "util/AutoRotation.h"
 
 namespace ReaderUtils {
 
@@ -104,6 +105,46 @@ inline uint8_t rotatedOrientation(const uint8_t orientation, const bool clockwis
 
 inline uint8_t flippedOrientation(const uint8_t orientation) {
   return (orientation + 2) % CrossPointSettings::ORIENTATION_COUNT;
+}
+
+// Only the foreground reader consumes this shared, allocation-free policy.
+// The main loop resets it whenever a reader loses foreground ownership.
+inline AutoRotation& autoRotationPolicy() {
+  static AutoRotation policy;
+  return policy;
+}
+
+inline void resetAutoRotation() { autoRotationPolicy().reset(); }
+
+inline bool takeAutoRotation(const MappedInputManager& input, uint8_t& targetOrientation) {
+  if (!SETTINGS.autoRotate || !halTiltSensor.isAvailable()) {
+    resetAutoRotation();
+    return false;
+  }
+  // Explicit controls take precedence; a new pose must settle after the hold.
+  if (input.wasAnyPressed() || input.wasAnyReleased()) {
+    resetAutoRotation();
+    return false;
+  }
+#if CROSSINK_APP_CAP_TOUCH
+  int touchX = 0;
+  int touchY = 0;
+  if (input.wasScreenTouchDown(touchX, touchY) || input.isScreenTouchHeld(touchX, touchY) ||
+      input.wasScreenTouchReleased()) {
+    resetAutoRotation();
+    return false;
+  }
+#endif
+  float ax, ay, az;
+  if (!halTiltSensor.takeAcceleration(ax, ay, az)) return false;
+
+  for (size_t i = 0; i < MappedInputManager::BUTTON_COUNT; ++i) {
+    if (input.isPhysicalPressed(static_cast<MappedInputManager::Button>(i))) {
+      resetAutoRotation();
+      return false;
+    }
+  }
+  return autoRotationPolicy().update(ax, ay, az, millis(), SETTINGS.orientation, targetOrientation);
 }
 
 struct PageTurnResult {
