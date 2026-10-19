@@ -377,10 +377,11 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
     // on next WiFi connect, which is useful when crossing time zones.
     add(SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced, "clockHasBeenSynced",
                             StrId::STR_CAT_SYSTEM));
+    // A failed IMU probe must not discard the persisted auto-rotation preference.
+    add(SettingInfo::Toggle(StrId::STR_AUTO_ROTATE, &CrossPointSettings::autoRotate, "autoRotate",
+                            StrId::STR_CAT_CONTROLS));
     // Only show sensor controls when the active device has a supported IMU.
     if (QuickActions::supportsTiltPageTurn()) {
-      add(SettingInfo::Toggle(StrId::STR_AUTO_ROTATE, &CrossPointSettings::autoRotate, "autoRotate",
-                              StrId::STR_CAT_CONTROLS));
       auto shortPowerButtonIt = std::find_if(
           v.begin(), v.end(), [](const SettingInfo& setting) { return settingKeyIs(setting, "shortPwrBtn"); });
       if (shortPowerButtonIt != v.end()) {

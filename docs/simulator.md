@@ -77,6 +77,25 @@ Rendered content ranges keep a fixed nonzero reading anchor visible. TXT sleep
 reconstruction is compared against the live rotated text body. PGM captures and
 JSON orientation/viewport/content receipts are saved in the capture directory.
 
+Check preference retention with no IMU, and active-touch deferral on Sticky's
+touch+IMU profile:
+
+```sh
+pio run -e simulator -e sticky-simulator
+CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION_PERSISTENCE=1 \
+  python3 scripts/run_simulator_smoke_test.py --env simulator --no-build
+CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION=1 \
+CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION_TOUCH=1 \
+  python3 scripts/run_simulator_smoke_test.py --env sticky-simulator --timeout 180 --no-build
+```
+
+The no-IMU scenario uses the production JSON load/save path and checks that the
+control stays hidden without losing the preference. The Sticky scenario drives
+raw HAL contacts while actual EPUB and TXT readers receive synthetic gravity.
+It covers two fingers with pinch resizing disabled, three with it enabled,
+partial releases down to one finger, and a suppressed single contact. Rotation
+must wait for the final release and a fresh stable pose, preserving the passage.
+
 Run the native policy, HAL, and input-release regressions separately:
 
 ```sh

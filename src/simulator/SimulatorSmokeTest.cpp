@@ -191,6 +191,8 @@ class SimulatorSmokeTest {
     AwaitReader,
     Capture,
     CheckTxtSleep,
+    TouchContacts,
+    SuppressTouch,
   };
 
   struct RotationAction {
@@ -203,6 +205,8 @@ class SimulatorSmokeTest {
     const char* label = nullptr;
     bool powerHold = false;
     bool overlay = false;
+    uint8_t contacts = 0;
+    bool pinchEnabled = false;
   };
 
   SmokeStep step = SmokeStep::Start;
@@ -238,6 +242,7 @@ class SimulatorSmokeTest {
   bool rotationOverlayButtonDown = false;
   bool rotationActionStarted = false;
   bool rotationSettingsConfigured = false;
+  bool rotationTouchGates = false;
   bool rotationTextReader = false;
   Activity* rotationReader = nullptr;
   ScreenshotInfo rotationAnchor;
@@ -357,6 +362,34 @@ class SimulatorSmokeTest {
     mappedInputManager.setReaderMode(false);
     LOG_INF("SMOKE", "All 25 mixed page gesture combinations passed");
 #endif
+  }
+
+  static void verifyAutoRotationPersistence() {
+    const uint8_t originalAutoRotate = SETTINGS.autoRotate;
+    JsonDocument original;
+    SETTINGS.toJson(original);
+    JsonDocument requested;
+    requested.set(original);
+    requested["autoRotate"] = 1;
+    SETTINGS.autoRotate = 0;
+    SETTINGS.fromJson(requested.as<JsonVariantConst>());
+    if (SETTINGS.autoRotate != 1) fail("Auto-rotation preference was ignored while loading settings");
+    if (!SETTINGS.saveToFile()) fail("Cannot save auto-rotation preference");
+    SETTINGS.autoRotate = 0;
+    if (!SETTINGS.loadFromFile() || SETTINGS.autoRotate != 1)
+      fail("Auto-rotation preference did not survive the production settings save/reload");
+
+    const auto controls = buildControlsSettingsParentList(getSettingsList());
+    const bool visible = std::any_of(controls.begin(), controls.end(),
+                                     [](const SettingInfo& setting) { return settingKeyIs(setting, "autoRotate"); });
+    if (visible != halTiltSensor.isAvailable())
+      fail("Auto-rotation control visibility does not match IMU availability");
+
+    SETTINGS.fromJson(original.as<JsonVariantConst>());
+    SETTINGS.autoRotate = originalAutoRotate;
+    if (!SETTINGS.saveToFile()) fail("Cannot restore settings after auto-rotation persistence check");
+    LOG_INF("SMOKE", "Auto-rotation preference survives save/reload; IMU=%s, control=%s",
+            halTiltSensor.isAvailable() ? "available" : "unavailable", visible ? "shown" : "hidden");
   }
 
   static void verifyStatusBarSettings() {
@@ -1181,7 +1214,9 @@ class SimulatorSmokeTest {
   }
 
   void startAutoRotationSmoke() {
-    if (!gpio.deviceIsX3() || !halTiltSensor.isAvailable()) fail("Auto-rotation smoke requires the X3 simulator");
+    rotationTouchGates = std::getenv("CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION_TOUCH") != nullptr;
+    if (!halTiltSensor.isAvailable() || (rotationTouchGates ? !gpio.hasTouch() : !gpio.deviceIsX3()))
+      fail("Auto-rotation smoke requires X3, or touch+IMU hardware for the touch regression");
     const char* book = std::getenv("CROSSINK_SIMULATOR_SMOKE_BOOK");
     if (!book || !Storage.exists(book)) fail("Auto-rotation smoke requires an EPUB fixture");
     SETTINGS.toJson(rotationOriginalSettings);
@@ -1193,6 +1228,16 @@ class SimulatorSmokeTest {
     SETTINGS.textAntiAliasing = 0;  // Compare the same monochrome text body in the live and sleep render paths.
     simulatorClearAcceleration();
     LOG_INF("SMOKE", "Auto-rotation uses synthetic gravity; this does not validate physical X3 axis signs");
+
+    if (rotationTouchGates) {
+      SETTINGS.autoRotate = 1;
+      SETTINGS.longPwrBtn = CrossPointSettings::ROTATE_CLOCKWISE;
+      SETTINGS.disableReaderTouchscreen = 0;
+      SETTINGS.twoFingerRotationEnabled = 0;
+      if (!SETTINGS.saveToFile()) fail("Cannot save touch auto-rotation regression settings");
+      queueStep("Touch auto-rotation regression", SmokeStep::AutoRotation, 4);
+      return;
+    }
 
     const auto all = getSettingsList();
     const auto controls = buildControlsSettingsParentList(all);
@@ -1301,6 +1346,33 @@ class SimulatorSmokeTest {
       RotationAction baseline{RotationActionType::Capture};
       baseline.label = "baseline";
       rotationScript.push_back(baseline);
+      if (rotationTouchGates) {
+        rotationScript.push_back({RotationActionType::EnableAuto});
+        const auto touch = [this](const uint8_t count, const bool pinchEnabled = false) {
+          RotationAction action{RotationActionType::TouchContacts};
+          action.contacts = count;
+          action.pinchEnabled = pinchEnabled;
+          rotationScript.push_back(action);
+        };
+        for (const uint8_t contacts : {uint8_t(2), uint8_t(3), uint8_t(1)}) {
+          touch(contacts, contacts == 3);
+          if (contacts == 1) rotationScript.push_back({RotationActionType::SuppressTouch});
+          addGravity(0.0f, -1.0f, 0.0f);
+          observe(1100, CrossPointSettings::PORTRAIT);
+          if (contacts > 1) {
+            touch(1, contacts == 3);
+            observe(750, CrossPointSettings::PORTRAIT);
+          }
+          touch(0);
+          observe(350, CrossPointSettings::PORTRAIT);
+          awaitOrientation(CrossPointSettings::LANDSCAPE_CW, contacts == 2   ? "after-two-contacts"
+                                                             : contacts == 3 ? "after-three-contacts"
+                                                                             : "after-suppressed-contact");
+          addGravity(1.0f, 0.0f, 0.0f);
+          awaitOrientation(CrossPointSettings::PORTRAIT, "touch-return-portrait");
+        }
+        continue;
+      }
       addGravity(0.0f, -1.0f, 0.0f);
       observe(1100, CrossPointSettings::PORTRAIT);
       rotationScript.push_back({RotationActionType::EnableAuto});
@@ -1352,7 +1424,8 @@ class SimulatorSmokeTest {
       awaitOrientation(CrossPointSettings::PORTRAIT, "auto-return-portrait");
     }
     rotationSettingsConfigured = true;
-    LOG_INF("SMOKE", "Production rotation settings persisted; exercising EPUB and TXT readers");
+    LOG_INF("SMOKE", "Production rotation settings persisted; exercising EPUB and TXT readers%s",
+            rotationTouchGates ? " with multi-contact and suppressed-touch gates" : "");
   }
 
   static bool rotationRendererMatches(const uint8_t orientation) {
@@ -1372,14 +1445,21 @@ class SimulatorSmokeTest {
   void runAutoRotationSmoke() {
     if (!rotationSettingsConfigured) buildAutoRotationScript();
     if (rotationScriptIndex == rotationScript.size()) {
-      if (!rotationSleepInteriorObserved)
+      if (!rotationTouchGates && !rotationSleepInteriorObserved)
         fail("TXT rotation fixture did not exercise a logical anchor inside a reflowed page");
       simulatorClearAcceleration();
+      if (rotationTouchGates) simulatorSetTouchContacts(0, 0.5f, 0.5f);
       SETTINGS.fromJson(rotationOriginalSettings.as<JsonVariantConst>());
       if (!SETTINGS.saveToFile()) fail("Cannot restore settings after rotation smoke");
-      LOG_INF("SMOKE",
-              "Synthetic auto-rotation passed: EPUB/TXT content anchors, four orientations, settings, "
-              "Power hold/release, disabled/flat/noise and foreground overlay gates");
+      if (rotationTouchGates) {
+        LOG_INF("SMOKE",
+                "Touch auto-rotation passed: EPUB/TXT anchors, two contacts with pinch off, three with pinch on, "
+                "partial releases, suppressed contact and fresh post-release stability");
+      } else {
+        LOG_INF("SMOKE",
+                "Synthetic auto-rotation passed: EPUB/TXT content anchors, four orientations, settings, "
+                "Power hold/release, disabled/flat/noise and foreground overlay gates");
+      }
       LOG_INF("SMOKE", "Simulator smoke test passed");
       std::_Exit(0);
     }
@@ -1531,6 +1611,13 @@ class SimulatorSmokeTest {
         break;
       case RotationActionType::CheckTxtSleep:
         verifyRotatedTxtSleepRebuild(action.label);
+        break;
+      case RotationActionType::TouchContacts:
+        SETTINGS.pinchFontResizeEnabled = action.pinchEnabled;
+        simulatorSetTouchContacts(action.contacts, 0.5f, 0.5f);
+        break;
+      case RotationActionType::SuppressTouch:
+        gpio.suppressTouchContact();
         break;
     }
     if (!complete && action.durationMs && elapsed > action.durationMs)
@@ -1783,6 +1870,11 @@ class SimulatorSmokeTest {
     switch (step) {
       case SmokeStep::Start:
         LOG_INF("SMOKE", "Starting simulator smoke test");
+        verifyAutoRotationPersistence();
+        if (std::getenv("CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION_PERSISTENCE")) {
+          LOG_INF("SMOKE", "Simulator smoke test passed");
+          std::_Exit(0);
+        }
         if (std::getenv("CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION")) {
           startAutoRotationSmoke();
           break;

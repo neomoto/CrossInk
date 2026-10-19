@@ -13,6 +13,10 @@
 - Keep the same reading passage visible through consecutive orientation changes.
 - Keep TXT sleep-page reconstruction aligned with the live page after rotation,
   including reflows that change the page's byte offset without changing its number.
+- Preserve the saved auto-rotation preference when the motion sensor is unavailable,
+  while hiding its device and web controls.
+- Defer auto-rotation until all screen contacts lift, including multi-finger and
+  suppressed contacts, then require a fresh stable pose.
 
 ## [v1.6.1] - 2026-10-03
 

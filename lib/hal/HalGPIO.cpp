@@ -216,6 +216,8 @@ unsigned long HalGPIO::getPowerButtonHeldTime() const { return inputMgr.getPower
 #if CROSSINK_APP_CAP_TOUCH
 bool HalGPIO::hasTouch() const { return inputMgr.hasTouch(); }
 
+bool HalGPIO::isTouchPressed() const { return inputMgr.isTouchPressed(); }
+
 bool HalGPIO::supportsMultiTouch() const { return inputMgr.supportsMultiTouch(); }
 
 HalGPIO::TouchSnapshot HalGPIO::getTouchSnapshot() const {

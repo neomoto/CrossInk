@@ -599,6 +599,10 @@ const std::vector<SettingInfo>& getBaseSettingsList();
 inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry = nullptr,
                                                 const DictionaryRegistry* dictRegistry = nullptr) {
   std::vector<SettingInfo> v = getBaseSettingsList();
+  if (!QuickActions::supportsTiltPageTurn()) {
+    v.erase(std::remove_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_AUTO_ROTATE; }),
+            v.end());
+  }
   if (!SETTINGS.shouldTrackReadingStats()) {
     for (auto& setting : v) {
       if (setting.valuePtr == &CrossPointSettings::sleepScreen) {

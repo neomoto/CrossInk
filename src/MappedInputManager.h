@@ -104,6 +104,8 @@ class MappedInputManager {
 #if CROSSINK_APP_CAP_TOUCH
   bool hasTouch() const;
   bool hasTouchHardware() const;
+  // Physical contacts still block layout changes when logical reader touch is disabled.
+  bool isScreenTouchActive() const;
   // Multi-touch follows the same reader touch gate as all other screen input,
   // so it cannot bypass the Disable Touchscreen setting.
   bool supportsMultiTouch() const;
@@ -189,6 +191,7 @@ class MappedInputManager {
 #else
   constexpr bool hasTouch() const { return false; }
   constexpr bool hasTouchHardware() const { return false; }
+  constexpr bool isScreenTouchActive() const { return false; }
   constexpr bool supportsMultiTouch() const { return false; }
   constexpr bool getTwoFingerTouch(int&, int&, int&, int&) const { return false; }
   constexpr bool wasCompletedMultiTouchSwipe(CompletedSwipe&) const { return false; }

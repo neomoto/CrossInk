@@ -256,6 +256,8 @@ bool MappedInputManager::hasTouch() const { return touchInputEnabled(); }
 
 bool MappedInputManager::hasTouchHardware() const { return gpio.hasTouch(); }
 
+bool MappedInputManager::isScreenTouchActive() const { return gpio.isTouchPressed(); }
+
 bool MappedInputManager::supportsMultiTouch() const { return touchInputEnabled() && gpio.supportsMultiTouch(); }
 
 bool MappedInputManager::getTwoFingerTouch(int& x1, int& y1, int& x2, int& y2) const {

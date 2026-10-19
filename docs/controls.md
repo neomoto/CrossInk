@@ -170,15 +170,20 @@ On devices with a motion sensor, enable **Settings > Controls > Auto-rotate
 default. Hold a new upright pose steadily for about half a second; face-up,
 face-down, diagonal, and unstable readings do not rotate the page.
 
+A temporarily unavailable sensor hides this control without clearing its saved
+value, including when other settings are saved.
+
 Auto-rotation applies only to the foreground EPUB or TXT reader, not menus,
 Quick Lock, or pre-rendered XTC pages. It preserves the current reading passage
 and uses the existing reader orientation/reflow path. Sensor samples do not
 write settings or keep the reader awake; only confirmed orientation changes are
 saved. EPUB saves orientation per book, while TXT uses the global setting.
 
-Buttons and active screen gestures take precedence. If auto-rotation stays
-enabled, a stable physical pose can override a manual rotation after the
-interaction ends. Disable it when you want to keep a manually chosen orientation.
+Buttons and all active screen contacts take precedence, including multiple
+fingers and contacts ignored by gesture settings. After release, the new pose
+must settle for another half-second. If auto-rotation stays enabled, a stable
+physical pose can override a manual rotation after the interaction ends. Disable
+it when you want to keep a manually chosen orientation.
 
 This development build's physical X3 axis mapping still needs device validation.
 See [rotation verification](./simulator.md#rotation-verification) before treating

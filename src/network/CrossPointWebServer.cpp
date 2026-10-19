@@ -123,6 +123,9 @@ bool isWebSettingAvailable(const SettingInfo& setting) {
   if (setting.nameId == StrId::STR_SIDE_BUTTON_CHORD && !deviceSupportsSideButtonChord(gpio)) {
     return false;
   }
+  if (setting.nameId == StrId::STR_AUTO_ROTATE && !QuickActions::supportsTiltPageTurn()) {
+    return false;
+  }
 
   const bool isTouchSetting =
       setting.nameId == StrId::STR_TOUCH_READER_CONTROLS || setting.nameId == StrId::STR_DISABLE_TOUCHSCREEN ||

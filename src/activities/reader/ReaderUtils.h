@@ -129,8 +129,8 @@ inline bool takeAutoRotation(const MappedInputManager& input, uint8_t& targetOri
 #if CROSSINK_APP_CAP_TOUCH
   int touchX = 0;
   int touchY = 0;
-  if (input.wasScreenTouchDown(touchX, touchY) || input.isScreenTouchHeld(touchX, touchY) ||
-      input.wasScreenTouchReleased()) {
+  // Raw contacts include multi-finger and suppressed sequences, not just eligible gestures.
+  if (input.isScreenTouchActive() || input.wasScreenTouchDown(touchX, touchY) || input.wasScreenTouchReleased()) {
     resetAutoRotation();
     return false;
   }
