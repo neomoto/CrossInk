@@ -380,8 +380,9 @@ which status-bar items are shown.
 - **Power Button**: Configure short-press and long-press actions independently. On supported devices, you can also configure the **Power + Up** shortcut.
 
 - **Auto-rotate (EPUB/TXT)**: On devices with a motion sensor, follow a stable
-  upright pose in the foreground EPUB/TXT reader. Off by default; ignores flat
-  and unstable poses. See [Automatic Reading Orientation](#automatic-reading-orientation).
+  reading pose in the foreground EPUB/TXT reader. It is off by default. Nearly flat,
+  diagonal, and unstable poses do not rotate the page.
+  See [Automatic Reading Orientation](#automatic-reading-orientation).
 
 - **Front Buttons**: Configure front-button remapping, orientation awareness,
   reader-only long-press behavior, Back action, and Menu action.
@@ -792,9 +793,10 @@ On the **Xteink X3** and **Sticky**, the gyroscope can be used to turn pages by 
 ### Automatic Reading Orientation
 
 Enable **Settings > Controls > Auto-rotate (EPUB/TXT)** on sensor-equipped
-devices. A new upright orientation must remain stable for about half a second
-before the page reflows. The reading passage stays visible across portrait,
-landscape, and inverted orientations.
+devices. A new reading orientation must remain stable for about half a second
+before the page reflows. Inclined reading poses are allowed. Nearly flat,
+diagonal, and unstable poses do not rotate the page. The reading passage stays
+visible across portrait, landscape, and inverted orientations.
 
 Menus, locks, active button/touch interactions, and pre-rendered XTC pages do not
 auto-rotate. To rotate manually instead, assign **Rotate Page CW** under

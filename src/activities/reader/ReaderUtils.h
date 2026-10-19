@@ -116,14 +116,70 @@ inline AutoRotation& autoRotationPolicy() {
 
 inline void resetAutoRotation() { autoRotationPolicy().reset(); }
 
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+struct AutoRotationDiagnosticLog {
+  uint32_t lastLogMs = 0;
+  uint32_t lastSampleMs = 0;
+  bool logged = false;
+  bool haveSample = false;
+};
+
+inline AutoRotationDiagnosticLog& autoRotationDiagnosticLog() {
+  static AutoRotationDiagnosticLog state;
+  return state;
+}
+
+// Gate, gap and sample records share a 4 Hz limit. Accepted decisions bypass it.
+inline bool autoRotationDiagnosticLogDue(const uint32_t now, const bool accepted = false) {
+  auto& state = autoRotationDiagnosticLog();
+  if (!accepted && state.logged && static_cast<uint32_t>(now - state.lastLogMs) < 250) return false;
+  state.lastLogMs = now;
+  state.logged = true;
+  return true;
+}
+
+inline void logAutoRotationGate(const char* reason) {
+  const uint32_t now = millis();
+  // A gate intentionally prevents consumption, so do not report it as a sensor gap.
+  autoRotationDiagnosticLog().haveSample = false;
+  if (!autoRotationDiagnosticLogDue(now)) return;
+  LOG_INF("ROT", "gate ms=%lu current=%u reason=%s", static_cast<unsigned long>(now),
+          static_cast<unsigned>(SETTINGS.orientation), reason);
+}
+
+inline void logAutoRotationSample(const uint32_t now, const float ax, const float ay, const float az,
+                                  const uint32_t consumedGapMs, const uint8_t target, const bool accepted,
+                                  const char* gateReason = nullptr) {
+  if (!autoRotationDiagnosticLogDue(now, accepted)) return;
+  const auto& snapshot = autoRotationPolicy().diagnosticSnapshot();
+  LOG_INF("ROT",
+          "sample ms=%lu ax=%.4f ay=%.4f az=%.4f current=%u candidate=%u target=%u reason=%s stable_ms=%lu "
+          "emitted=%u accepted=%u consumed_gap_ms=%lu",
+          static_cast<unsigned long>(now), static_cast<double>(ax), static_cast<double>(ay), static_cast<double>(az),
+          static_cast<unsigned>(SETTINGS.orientation), static_cast<unsigned>(snapshot.candidate),
+          static_cast<unsigned>(target), gateReason ? gateReason : AutoRotation::diagnosticReasonName(snapshot.reason),
+          static_cast<unsigned long>(snapshot.stableMs), static_cast<unsigned>(snapshot.emitted),
+          static_cast<unsigned>(accepted), static_cast<unsigned long>(consumedGapMs));
+}
+#endif
+
 inline bool takeAutoRotation(const MappedInputManager& input, uint8_t& targetOrientation) {
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+  targetOrientation = 0xFF;  // Explicitly absent unless this call accepts a decision.
+#endif
   if (!SETTINGS.autoRotate || !halTiltSensor.isAvailable()) {
     resetAutoRotation();
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+    logAutoRotationGate(!SETTINGS.autoRotate ? "disabled" : "unavailable");
+#endif
     return false;
   }
   // Explicit controls take precedence; a new pose must settle after the hold.
   if (input.wasAnyPressed() || input.wasAnyReleased()) {
     resetAutoRotation();
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+    logAutoRotationGate("button_edge");
+#endif
     return false;
   }
 #if CROSSINK_APP_CAP_TOUCH
@@ -132,19 +188,50 @@ inline bool takeAutoRotation(const MappedInputManager& input, uint8_t& targetOri
   // Raw contacts include multi-finger and suppressed sequences, not just eligible gestures.
   if (input.isScreenTouchActive() || input.wasScreenTouchDown(touchX, touchY) || input.wasScreenTouchReleased()) {
     resetAutoRotation();
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+    logAutoRotationGate("touch");
+#endif
     return false;
   }
 #endif
   float ax, ay, az;
-  if (!halTiltSensor.takeAcceleration(ax, ay, az)) return false;
+  if (!halTiltSensor.takeAcceleration(ax, ay, az)) {
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+    const uint32_t now = millis();
+    const auto& state = autoRotationDiagnosticLog();
+    // Ordinary 16 ms reader iterations between 50 ms polls are not sample gaps.
+    if (state.haveSample && static_cast<uint32_t>(now - state.lastSampleMs) > 150 &&
+        autoRotationDiagnosticLogDue(now)) {
+      LOG_INF("ROT", "gap ms=%lu current=%u since_consumed_ms=%lu", static_cast<unsigned long>(now),
+              static_cast<unsigned>(SETTINGS.orientation), static_cast<unsigned long>(now - state.lastSampleMs));
+    }
+#endif
+    return false;
+  }
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+  const uint32_t now = millis();
+  auto& diagnosticLog = autoRotationDiagnosticLog();
+  const uint32_t consumedGapMs = diagnosticLog.haveSample ? now - diagnosticLog.lastSampleMs : 0;
+  diagnosticLog.lastSampleMs = now;
+  diagnosticLog.haveSample = true;
+#endif
 
   for (size_t i = 0; i < MappedInputManager::BUTTON_COUNT; ++i) {
     if (input.isPhysicalPressed(static_cast<MappedInputManager::Button>(i))) {
       resetAutoRotation();
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+      logAutoRotationSample(now, ax, ay, az, consumedGapMs, targetOrientation, false, "button_hold");
+#endif
       return false;
     }
   }
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+  const bool accepted = autoRotationPolicy().update(ax, ay, az, now, SETTINGS.orientation, targetOrientation);
+  logAutoRotationSample(now, ax, ay, az, consumedGapMs, targetOrientation, accepted);
+  return accepted;
+#else
   return autoRotationPolicy().update(ax, ay, az, millis(), SETTINGS.orientation, targetOrientation);
+#endif
 }
 
 struct PageTurnResult {

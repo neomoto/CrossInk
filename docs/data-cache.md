@@ -55,6 +55,17 @@ The main data directory is `.crosspoint` on the SD card. It stores render caches
 
 Four-tone sleep covers use separate `_absolute.bmp` files so older cover shading is not reused. These are generated on demand for supported displays; TXT/Markdown JPG covers also use a separate `cover_absolute.bmp`. Existing cover and thumbnail caches remain available, and no manual cache reset is needed.
 
+## TXT Layout and Bookmarks
+
+TXT page indexes use layout version 5 for forward-greedy wrapping. The reader
+rebuilds older indexes automatically.
+
+The reader recovers an old page-only bookmark from a valid version 4 index before
+it replaces that index. It stores and syncs the source-byte offset in the existing
+six-byte progress format. If that update fails, the reader keeps the version 4
+index. The new layout remains in RAM. Existing six-byte progress records need no
+migration.
+
 ## Clearing Cache Data
 
 Deleting the entire `.crosspoint` directory resets caches, settings, saved network/server data, bookmarks, recent books, reading progress, and reading stats.

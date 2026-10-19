@@ -1,6 +1,6 @@
 # File Formats
 
-These formats describe the SD-card cache files under `/.crosspoint/epub_<hash>/`.
+These formats describe the SD-card files under `/.crosspoint/`.
 All POD fields are written in the ESP32 little-endian representation used by
 `Serialization.h`; strings are length-prefixed UTF-8 unless a format notes a
 fixed-size char buffer.
@@ -20,6 +20,48 @@ consumed. A later clean exit rewrites the current stack; an unclean shutdown
 cannot revive history from a previous session. This new sidecar does not change
 EPUB layout cache formats. As with in-memory Back history, changing font or
 layout may shift the destination page.
+
+## `/.crosspoint/txt_<hash>/index.bin`
+
+### Version 5
+
+Version 5 uses forward-greedy word fitting with exact rendered prefix widths.
+The serialized layout is unchanged from version 4, but line boundaries can differ.
+The header contains 34 serialized bytes without padding.
+
+| Byte offset | Type | Field |
+| --- | --- | --- |
+| 0 | `u32` | Magic `0x54585449` |
+| 4 | `u8` | Layout version `5` |
+| 5 | `u32` | Source file size |
+| 9 | `s32` | Viewport width |
+| 13 | `s32` | Lines per page |
+| 17 | `s32` | Font ID |
+| 21 | `s32` | Vertical margin |
+| 25 | `s32` | Horizontal margin |
+| 29 | `u8` | Paragraph alignment |
+| 30 | `u32` | Page count |
+
+Page-start offsets follow as little-endian `u32` values.
+A version 4 index supplies only legacy byte anchors. It never drives new pagination.
+
+## `/.crosspoint/txt_<hash>/progress.bin`
+
+Current progress records contain a page index and a source-byte offset:
+
+| Byte offset | Type | Field |
+| --- | --- | --- |
+| 0 | `u16` | Page index |
+| 2 | `u32` | Source-byte offset |
+
+Historical four-byte records contain the page index in their first two bytes
+and zero padding in their last two bytes.
+
+Before replacing a valid version 4 index, the reader resolves that old page number
+to a byte offset. It updates and syncs the existing progress file before it saves
+the version 5 index. A failed progress update leaves the old index intact.
+Live pending and retained anchors take precedence over the old bookmark during
+repeated rebuilds.
 
 ## `/.crosspoint/home_carousel_cache_<index>.bin`
 

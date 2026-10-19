@@ -7,9 +7,10 @@
 #include <I18n.h>
 #include <Memory.h>
 #include <Serialization.h>
-#include <Utf8.h>
+#include <TxtPageLayout.h>
 
 #include <algorithm>
+#include <optional>
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -29,70 +30,64 @@ constexpr size_t CHUNK_SIZE = 8 * 1024;  // 8KB chunk for reading
 constexpr unsigned long LONG_PRESS_MENU_MS = 600;
 // Cache file magic and version
 constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
-constexpr uint8_t CACHE_VERSION = 4;          // Increment when cache format changes
+constexpr uint8_t CACHE_VERSION = 5;          // Forward-greedy TXT line boundaries
 constexpr uint32_t MAX_CACHE_PAGES = 65535;   // Sanity cap to prevent unbounded reserve()
+constexpr uint8_t LEGACY_CACHE_VERSION = 4;   // Used only to migrate page-only bookmarks
+constexpr size_t CACHE_HEADER_BYTES = 34;
 
-// Parses and word-wraps lines from a file chunk into outLines.
-// Returns the number of bytes consumed from the start of buffer.
-size_t parseAndWrapLines(const uint8_t* buffer, size_t chunkSize, size_t fileOffset, size_t fileSize, int linesPerPage,
-                         GfxRenderer& renderer, int fontId, int vw, std::vector<std::string>& outLines) {
-  size_t pos = 0;
-  while (pos < chunkSize && static_cast<int>(outLines.size()) < linesPerPage) {
-    size_t lineEnd = pos;
-    while (lineEnd < chunkSize && buffer[lineEnd] != '\n') lineEnd++;
-    bool lineComplete = (lineEnd < chunkSize) || (fileOffset + lineEnd >= fileSize);
-    if (!lineComplete && !outLines.empty()) break;
+uint32_t readLittleEndian32(const uint8_t* data) {
+  return static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+         (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
+}
 
-    size_t lineContentLen = lineEnd - pos;
-    bool hasCR = (lineContentLen > 0 && buffer[pos + lineContentLen - 1] == '\r');
-    size_t displayLen = hasCR ? lineContentLen - 1 : lineContentLen;
-    std::string line(reinterpret_cast<const char*>(buffer + pos), displayLen);
-    size_t lineBytePos = 0;
+bool isLegacyCacheHeader(const uint8_t* header, const size_t fileSize, const size_t cacheSize, const uint16_t page) {
+  if (readLittleEndian32(header) != CACHE_MAGIC || header[4] != LEGACY_CACHE_VERSION) return false;
+  if (readLittleEndian32(header + 5) != fileSize) return false;
+  const uint32_t numPages = readLittleEndian32(header + 30);
+  if (numPages == 0 || numPages > MAX_CACHE_PAGES || page >= numPages) return false;
+  return cacheSize == CACHE_HEADER_BYTES + numPages * sizeof(uint32_t);
+}
 
-    do {
-      if (line.empty()) {
-        outLines.emplace_back();
-        break;
-      }
-
-      if (renderer.getTextWidth(fontId, line.c_str()) <= vw) {
-        outLines.push_back(line);
-        lineBytePos = displayLen;
-        line.clear();
-        break;
-      }
-      size_t breakPos = line.length();
-      while (breakPos > 0 && renderer.getTextWidth(fontId, line.substr(0, breakPos).c_str()) > vw) {
-        size_t spacePos = line.rfind(' ', breakPos - 1);
-        if (spacePos != std::string::npos && spacePos > 0) {
-          breakPos = spacePos;
-        } else {
-          breakPos--;
-          while (breakPos > 0 && (line[breakPos] & 0xC0) == 0x80) breakPos--;
-        }
-      }
-      if (breakPos == 0) {
-        breakPos = 1;
-        while (breakPos < line.length() && (line[breakPos] & 0xC0) == 0x80) breakPos++;
-      }
-      outLines.push_back(line.substr(0, breakPos));
-      size_t skipChars = breakPos;
-      if (breakPos < line.length() && line[breakPos] == ' ') skipChars++;
-      lineBytePos += skipChars;
-      line = line.substr(skipChars);
-    } while (!line.empty() && static_cast<int>(outLines.size()) < linesPerPage);
-
-    if (line.empty()) {
-      pos = lineEnd + 1;
-    } else {
-      pos = pos + lineBytePos;
-      break;
-    }
+std::optional<size_t> readLegacyCacheOffset(const Txt& txt, const uint16_t page) {
+  HalFile cache;
+  if (!Storage.openFileForRead("TRS", txt.getCachePath() + "/index.bin", cache)) return std::nullopt;
+  uint8_t header[CACHE_HEADER_BYTES];
+  if (cache.read(header, sizeof(header)) != static_cast<int>(sizeof(header)) ||
+      !isLegacyCacheHeader(header, txt.getFileSize(), cache.size(), page)) {
+    return std::nullopt;
   }
-  if (pos == 0 && !outLines.empty()) {
-    pos = 1;
-  }
-  return pos;
+  if (!cache.seekSet(CACHE_HEADER_BYTES + page * sizeof(uint32_t))) return std::nullopt;
+  uint8_t data[4];
+  if (cache.read(data, sizeof(data)) != static_cast<int>(sizeof(data))) return std::nullopt;
+  const uint32_t offset = readLittleEndian32(data);
+  if (offset >= txt.getFileSize()) return std::nullopt;
+  return offset;
+}
+
+std::optional<size_t> readLegacyProgressOffset(const Txt& txt) {
+  HalFile progress;
+  if (!Storage.openFileForRead("TRS", txt.getCachePath() + "/progress.bin", progress)) return std::nullopt;
+  uint8_t data[6];
+  const auto bytesRead = progress.read(data, sizeof(data));
+  progress.close();
+  // Historical format: page(2) + reserved zeroes(2). Five bytes can be an
+  // interrupted extension; preserve the reader's existing four-byte minimum.
+  if (bytesRead < 4 || bytesRead == static_cast<int>(sizeof(data))) return std::nullopt;
+  return readLegacyCacheOffset(txt, static_cast<uint16_t>(data[0] | (data[1] << 8)));
+}
+
+bool upgradeLegacyProgress(const Txt& txt, const size_t offset) {
+  // Replace the historical reserved bytes and append the offset without
+  // truncating its page field. A short write keeps the v4 cache recoverable.
+  const std::string path = txt.getCachePath() + "/progress.bin";
+  HalFile progress = Storage.open(path.c_str(), O_WRONLY);
+  if (!progress || !progress.seekSet(2)) return false;
+  const uint8_t data[4] = {static_cast<uint8_t>(offset), static_cast<uint8_t>(offset >> 8),
+                           static_cast<uint8_t>(offset >> 16), static_cast<uint8_t>(offset >> 24)};
+  const bool persisted = progress.write(data, sizeof(data)) == sizeof(data) && progress.sync();
+  progress.close();
+  if (!persisted) LOG_ERR("TRS", "Failed to migrate legacy TXT progress");
+  return persisted;
 }
 
 int getReaderLineHeight(const GfxRenderer& renderer, const int fontId) {
@@ -490,17 +485,41 @@ bool TxtReaderActivity::applyReaderOrientation(const uint8_t orientation, Render
 bool TxtReaderActivity::applyAutoRotation() {
   if (!SETTINGS.autoRotate) {
     ReaderUtils::resetAutoRotation();
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+    ReaderUtils::logAutoRotationGate("txt_disabled");
+#endif
     return false;
   }
   RenderLock lock(*this, RenderLock::Mode::Try);
   if (!lock.ownsLock() || !txt || !initialized || pendingOrientationOffset || pageOffsets.empty() ||
       quickActionsPopup.isActive()) {
     ReaderUtils::resetAutoRotation();
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+    ReaderUtils::logAutoRotationGate("txt_busy");
+#endif
     return false;
   }
   uint8_t targetOrientation;
   if (!ReaderUtils::takeAutoRotation(mappedInput, targetOrientation)) return false;
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+  const auto beforeRenderer = renderer.getOrientation();
+  const auto expectedRenderer = ReaderUtils::toRendererOrientation(targetOrientation);
+  const int beforePage = currentPage;
+  const bool applied = applyReaderOrientation(targetOrientation, std::move(lock));
+  const auto appliedRenderer = renderer.getOrientation();
+  LOG_INF("ROT",
+          "apply reader=txt ms=%lu target=%u before_renderer=%u expected_renderer=%u renderer=%u match=%u "
+          "current=%u page=%d applied=%u anchor_valid=%u file_offset=%lu",
+          static_cast<unsigned long>(millis()), static_cast<unsigned>(targetOrientation),
+          static_cast<unsigned>(beforeRenderer), static_cast<unsigned>(expectedRenderer),
+          static_cast<unsigned>(appliedRenderer), static_cast<unsigned>(appliedRenderer == expectedRenderer),
+          static_cast<unsigned>(SETTINGS.orientation), beforePage, static_cast<unsigned>(applied),
+          static_cast<unsigned>(pendingOrientationOffset.has_value()),
+          static_cast<unsigned long>(pendingOrientationOffset.value_or(0)));
+  return applied;
+#else
   return applyReaderOrientation(targetOrientation, std::move(lock));
+#endif
 }
 
 void TxtReaderActivity::toggleDarkMode() {
@@ -738,17 +757,22 @@ void TxtReaderActivity::initializeReader() {
   linesPerPage = viewportHeight / lineHeight;
   if (linesPerPage < 1) linesPerPage = 1;
 
-  // Try to load cached page index first
+  // Resolve persisted metadata before replacement, but never prefer it to a
+  // live pending/retained reading position after a failed migration.
+  std::optional<size_t> legacyOffset;
   if (!loadPageIndexCache()) {
-    // Cache not found, build page index
+    legacyOffset = readLegacyProgressOffset(*txt);
+    const bool canReplaceCache = !legacyOffset || upgradeLegacyProgress(*txt, *legacyOffset);
     buildPageIndex();
-    // Save to cache for next time
-    savePageIndexCache();
+    if (canReplaceCache) savePageIndexCache();
   }
 
-  if (pendingOrientationOffset && !pageOffsets.empty()) {
-    const auto nextPage = std::upper_bound(pageOffsets.begin(), pageOffsets.end(), *pendingOrientationOffset);
+  const auto restoreOffset =
+      txtlayout::preferredRestoreOffset(pendingOrientationOffset, rotationReadingOffset, legacyOffset);
+  if (restoreOffset && !pageOffsets.empty()) {
+    const auto nextPage = std::upper_bound(pageOffsets.begin(), pageOffsets.end(), *restoreOffset);
     currentPage = std::max(0, static_cast<int>(nextPage - pageOffsets.begin()) - 1);
+    rotationReadingOffset = *restoreOffset;
     pendingOrientationOffset.reset();
   } else {
     loadProgress();
@@ -801,29 +825,30 @@ bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>
     return false;
   }
 
-  // Read a chunk from file
-  size_t chunkSize = std::min(CHUNK_SIZE, fileSize - offset);
-  auto* buffer = static_cast<uint8_t*>(malloc(chunkSize + 1));
+  // Bounded lookahead keeps a forced 8KB wrap off UTF-8/CRLF interiors.
+  const size_t readSize = std::min(CHUNK_SIZE + txtlayout::CHUNK_LOOKAHEAD_BYTES, fileSize - offset);
+  auto* buffer = static_cast<uint8_t*>(malloc(readSize + 1));
   if (!buffer) {
-    LOG_ERR("TRS", "Failed to allocate %zu bytes", chunkSize);
+    LOG_ERR("TRS", "Failed to allocate %zu bytes", readSize);
     return false;
   }
 
-  if (!txt->readContent(buffer, offset, chunkSize)) {
+  if (!txt->readContent(buffer, offset, readSize)) {
     free(buffer);
     return false;
   }
+  const size_t chunkSize = txtlayout::alignedChunkLength(buffer, CHUNK_SIZE, readSize);
   buffer[chunkSize] = '\0';
 
   // Prime the SD card font's advance table before the wrap helper starts
-  // measuring strings. This avoids on-demand SD glyph lookups for every width
-  // check while preserving the shared parseAndWrapLines() implementation.
+  // measuring strings, avoiding on-demand SD glyph lookups for every probe.
   if (renderer.isSdCardFont(cachedFontId)) {
     renderer.ensureSdCardFontReady(cachedFontId, reinterpret_cast<const char*>(buffer), /*styleMask=*/0x01);
   }
 
-  size_t pos = parseAndWrapLines(buffer, chunkSize, offset, fileSize, linesPerPage, renderer, cachedFontId,
-                                 viewportWidth, outLines);
+  size_t pos = txtlayout::parsePage(
+      buffer, chunkSize, offset, fileSize, linesPerPage, viewportWidth,
+      [this](const char* text) { return renderer.getTextWidth(cachedFontId, text); }, outLines);
   nextOffset = offset + pos;
   if (nextOffset > fileSize) {
     nextOffset = fileSize;
@@ -1262,6 +1287,13 @@ bool TxtReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gfx
           savedOffset = off;
           offsetKnown = true;
         }
+      } else if (n >= 4) {
+        // Resolve only the old byte anchor, never render with old pagination.
+        const auto legacyOffset = readLegacyCacheOffset(txt, static_cast<uint16_t>(savedPage));
+        if (legacyOffset) {
+          savedOffset = *legacyOffset;
+          offsetKnown = true;
+        }
       }
     }
   }
@@ -1328,17 +1360,20 @@ bool TxtReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gfx
     return false;
   }
 
-  size_t chunkSize = std::min(CHUNK_SIZE, fileSize - offset);
-  auto* buffer = static_cast<uint8_t*>(malloc(chunkSize + 1));
+  const size_t readSize = std::min(CHUNK_SIZE + txtlayout::CHUNK_LOOKAHEAD_BYTES, fileSize - offset);
+  auto* buffer = static_cast<uint8_t*>(malloc(readSize + 1));
   if (!buffer) return false;
 
-  if (!txt.readContent(buffer, offset, chunkSize)) {
+  if (!txt.readContent(buffer, offset, readSize)) {
     free(buffer);
     return false;
   }
+  const size_t chunkSize = txtlayout::alignedChunkLength(buffer, CHUNK_SIZE, readSize);
   buffer[chunkSize] = '\0';
 
-  parseAndWrapLines(buffer, chunkSize, offset, fileSize, linesPerPage, renderer, fontId, vw, pageLines);
+  txtlayout::parsePage(
+      buffer, chunkSize, offset, fileSize, linesPerPage, vw,
+      [&renderer, fontId](const char* text) { return renderer.getTextWidth(fontId, text); }, pageLines);
   free(buffer);
 
   if (pageLines.empty()) return false;

@@ -101,10 +101,24 @@ Run the native policy, HAL, and input-release regressions separately:
 ```sh
 cmake -S test -B /tmp/crossink-rotation-tests -G 'Unix Makefiles'
 cmake --build /tmp/crossink-rotation-tests \
-  --target AutoRotationTest ReleaseSuppressionTest InputReleaseGuardTest -j 6
+  --target AutoRotationTest TxtPageLayoutTest ReleaseSuppressionTest InputReleaseGuardTest -j 6
 ctest --test-dir /tmp/crossink-rotation-tests --output-on-failure \
-  -R 'AutoRotation|HalTiltSensor|ReleaseSuppression|InputReleaseGuard'
+  -R 'AutoRotation|HalTiltSensor|TxtPageLayout|ReleaseSuppression|InputReleaseGuard'
 ```
+
+### Inclined Poses and TXT Reflow
+
+The posture gate requires at least 40% of gravity in the assumed display plane.
+It accepts synthetic 30-degree reading poses with small pitch variation, but
+rejects flat poses.
+
+Use a normal resumed reader and a nonzero reading page. Check both landscape
+directions, direct left/right switching, and small motion jitter. Check flat poses
+while already in landscape so that an incorrect portrait change is visible.
+
+For TXT responsiveness, use long physical paragraphs with real font measurement.
+Keep a fixed input schedule to expose blocked reader loops. Check reading anchors
+and screenshots, not successful orientation assignments alone.
 
 ### Physical X3 Check
 
@@ -129,8 +143,31 @@ Before treating the build as hardware-verified:
 No physical sensor-noise, battery-current, e-ink refresh, or electrical wake
 measurements are implied by a simulator pass.
 
+### Bounded Rotation Diagnostics
+
+Define `CROSSINK_ROTATION_DIAGNOSTICS=1` in a local diagnostic build, retaining
+the environment's existing build flags. Serial logging must be enabled with
+`LOG_LEVEL` at least `1`. For the native X3 profile, the define can be added
+through `build_src_flags` in `platformio.local.ini`.
+
+`ROT` records contain consumed acceleration in g, current/candidate/accepted
+orientations, rejection or gating reasons, and stable-hold time. Ordinary
+sample/gate/gap records share a four-per-second limit; accepted decisions and
+applied rotations are recorded immediately. EPUB/TXT application records include
+the actual and expected renderer orientation plus numeric reading anchors.
+They do not include book paths, titles, or text.
+
+These diagnostics do not change the rotation policy or calibrate sensor axes.
+The diagnostic state and calls are omitted when the define is absent. Opening
+the X3 USB serial port can reset it even with DTR/RTS disabled: save the reading
+position first, and close any monitor before using the flasher.
+
 ## Cache Note
 
 On first open of an EPUB, an **Indexing...** popup appears while the section cache is built in `.crosspoint/`.
 
-If rendering looks stale after a code change, delete `./fs_/.crosspoint/` to clear simulator caches.
+TXT layout caches rebuild automatically after a version change. Keep legacy TXT
+indexes until the reader upgrades their page-only bookmarks.
+
+CAUTION: Removing `./fs_/.crosspoint/` also removes emulator settings and reading
+progress. Use a disposable emulator card for a complete reset.

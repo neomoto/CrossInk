@@ -5821,12 +5821,18 @@ void EpubReaderActivity::applyOrientation(const uint8_t orientation, RenderLock&
 bool EpubReaderActivity::applyAutoRotation() {
   if (!SETTINGS.autoRotate) {
     ReaderUtils::resetAutoRotation();
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+    ReaderUtils::logAutoRotationGate("epub_disabled");
+#endif
     return false;
   }
 
   RenderLock lock(*this, RenderLock::Mode::Try);
   if (!lock.ownsLock()) {
     ReaderUtils::resetAutoRotation();
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+    ReaderUtils::logAutoRotationGate("epub_lock");
+#endif
     return false;
   }
   // Wait for the visible position to settle. Sensor samples must never cancel
@@ -5840,12 +5846,32 @@ bool EpubReaderActivity::applyAutoRotation() {
       pendingCompletedFeedback || pendingTiltPageTurnFeedback || pendingRenderModeToast || pendingSafeModeToast ||
       quickActionsPopup.isActive() || currentSpineIndex >= epub->getSpineItemsCount()) {
     ReaderUtils::resetAutoRotation();
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+    ReaderUtils::logAutoRotationGate("epub_busy");
+#endif
     return false;
   }
 
   uint8_t targetOrientation;
   if (!ReaderUtils::takeAutoRotation(mappedInput, targetOrientation)) return false;
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+  const auto beforeRenderer = renderer.getOrientation();
+  const auto expectedRenderer = ReaderUtils::toRendererOrientation(targetOrientation);
+  const int beforePage = section->currentPage;
+#endif
   applyOrientation(targetOrientation, std::move(lock));
+#if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
+  const auto appliedRenderer = renderer.getOrientation();
+  LOG_INF("ROT",
+          "apply reader=epub ms=%lu target=%u before_renderer=%u expected_renderer=%u renderer=%u match=%u "
+          "current=%u spine=%d page=%d anchor_valid=%u anchor_spine=%d text_offset=%lu",
+          static_cast<unsigned long>(millis()), static_cast<unsigned>(targetOrientation),
+          static_cast<unsigned>(beforeRenderer), static_cast<unsigned>(expectedRenderer),
+          static_cast<unsigned>(appliedRenderer), static_cast<unsigned>(appliedRenderer == expectedRenderer),
+          static_cast<unsigned>(SETTINGS.orientation), currentSpineIndex, beforePage,
+          static_cast<unsigned>(rotationVisibleTextOffset.has_value()), rotationAnchorSpineIndex,
+          static_cast<unsigned long>(rotationVisibleTextOffset.value_or(0)));
+#endif
   requestUpdate();
   return true;
 }

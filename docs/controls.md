@@ -167,8 +167,9 @@ apply. **Orientation aware** remains a separate option for side-button mapping.
 
 On devices with a motion sensor, enable **Settings > Controls > Auto-rotate
 (EPUB/TXT)** to follow the device's orientation while reading. It is off by
-default. Hold a new upright pose steadily for about half a second; face-up,
-face-down, diagonal, and unstable readings do not rotate the page.
+default. Hold a new reading pose steadily for about half a second. Inclined
+reading poses are allowed. Nearly flat, face-up, face-down, diagonal, and unstable
+poses do not rotate the page.
 
 A temporarily unavailable sensor hides this control without clearing its saved
 value, including when other settings are saved.

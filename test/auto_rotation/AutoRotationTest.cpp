@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 
@@ -19,6 +20,14 @@ constexpr std::array<Gravity, 4> ORIENTATION_SAMPLES = {
 
 bool sample(AutoRotation& policy, const Gravity& gravity, uint32_t now, uint8_t current, uint8_t& target) {
   return policy.update(gravity.ax, gravity.ay, gravity.az, now, current, target);
+}
+
+Gravity readingPose(uint8_t orientation, float elevationDegrees, float faceSign = 1.0f, float scale = 1.0f) {
+  constexpr float RADIANS_PER_DEGREE = 0.017453292519943295f;
+  const float elevation = elevationDegrees * RADIANS_PER_DEGREE;
+  const float planeGravity = scale * std::sin(elevation);
+  const auto& direction = ORIENTATION_SAMPLES[orientation];
+  return {direction.ax * planeGravity, direction.ay * planeGravity, faceSign * scale * std::cos(elevation)};
 }
 
 void expectHoldBefore(AutoRotation& policy, const Gravity& gravity, uint32_t start, uint8_t current, uint8_t& target) {
@@ -82,16 +91,84 @@ TEST(AutoRotation, CanRotateThroughAllFourOrientationsAsTheCallerAppliesEachTarg
   }
 }
 
-TEST(AutoRotation, RejectsFaceUpFaceDownAndInsufficientlyUprightSamples) {
-  constexpr std::array<Gravity, 5> flat = {
-      {{0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, -0.6f, 0.8f}, {0.0f, 0.6f, -0.8f}, {0.0f, -0.66f, 0.751f}}};
-  for (const auto& gravity : flat) {
-    AutoRotation policy;
-    uint8_t target = 0xFF;
-    for (uint32_t now = 0; now <= 1500; now += 50) {
-      EXPECT_FALSE(sample(policy, gravity, now, 0, target));
+TEST(AutoRotation, ConfirmsAllFourOrientationsAtThirtyDegreeReadingElevation) {
+  // At 30 degrees above horizontal, half the gravity lies in the display plane
+  // and sqrt(0.75) lies along its normal. Either face-normal sign is supported.
+  for (uint8_t orientation = 0; orientation < ORIENTATION_SAMPLES.size(); ++orientation) {
+    for (const float faceSign : {-1.0f, 1.0f}) {
+      SCOPED_TRACE(orientation);
+      SCOPED_TRACE(faceSign);
+      const Gravity gravity = readingPose(orientation, 30.0f, faceSign);
+      AutoRotation policy;
+      uint8_t target = 0xFF;
+      const uint8_t current = (orientation + 1) % 4;
+
+      expectHoldBefore(policy, gravity, 1000, current, target);
+      EXPECT_EQ(target, 0xFF);
+      ASSERT_TRUE(sample(policy, gravity, 1500, current, target));
+      EXPECT_EQ(target, orientation);
+      for (uint32_t now = 1550; now <= 2000; now += 50) {
+        EXPECT_FALSE(sample(policy, gravity, now, current, target));
+      }
+      for (uint32_t now = 2050; now <= 3000; now += 50) {
+        EXPECT_FALSE(sample(policy, gravity, now, orientation, target));
+      }
+      EXPECT_EQ(target, orientation);
     }
-    EXPECT_EQ(target, 0xFF);
+  }
+}
+
+TEST(AutoRotation, AllowsSmallPitchWiggleAroundThirtyDegreeReadingElevation) {
+  for (uint8_t orientation = 0; orientation < ORIENTATION_SAMPLES.size(); ++orientation) {
+    for (const float faceSign : {-1.0f, 1.0f}) {
+      SCOPED_TRACE(orientation);
+      SCOPED_TRACE(faceSign);
+      AutoRotation policy;
+      uint8_t target = 0xFF;
+      const uint8_t current = (orientation + 1) % 4;
+      for (uint32_t now = 0; now < 500; now += 50) {
+        const float elevation = (now / 50) % 2 ? 32.0f : 28.0f;
+        EXPECT_FALSE(sample(policy, readingPose(orientation, elevation, faceSign), now, current, target));
+      }
+      EXPECT_EQ(target, 0xFF);
+      ASSERT_TRUE(sample(policy, readingPose(orientation, 30.0f, faceSign), 500, current, target));
+      EXPECT_EQ(target, orientation);
+    }
+  }
+}
+
+TEST(AutoRotation, ReadingPostureDoesNotDependOnPlausibleGravityScale) {
+  for (const float elevation : {30.0f, 45.0f}) {
+    for (const float scale : {0.85f, 1.0f, 1.15f}) {
+      for (const float faceSign : {-1.0f, 1.0f}) {
+        SCOPED_TRACE(elevation);
+        SCOPED_TRACE(scale);
+        SCOPED_TRACE(faceSign);
+        AutoRotation policy;
+        uint8_t target = 0xFF;
+        const Gravity gravity = readingPose(1, elevation, faceSign, scale);
+        expectHoldBefore(policy, gravity, 0, 0, target);
+        EXPECT_EQ(target, 0xFF);
+        ASSERT_TRUE(sample(policy, gravity, 500, 0, target));
+        EXPECT_EQ(target, 1);
+      }
+    }
+  }
+}
+
+TEST(AutoRotation, RefusesTableFlatAndNearFlatJitter) {
+  for (const float elevation : {0.0f, 15.0f}) {
+    for (const float faceSign : {-1.0f, 1.0f}) {
+      SCOPED_TRACE(elevation);
+      SCOPED_TRACE(faceSign);
+      AutoRotation policy;
+      uint8_t target = 0xFF;
+      for (uint32_t now = 0; now <= 1500; now += 50) {
+        const float pitchJitter = (now / 50) % 2 ? 2.0f : -2.0f;
+        EXPECT_FALSE(sample(policy, readingPose(1, elevation + pitchJitter, faceSign), now, 0, target));
+      }
+      EXPECT_EQ(target, 0xFF);
+    }
   }
 }
 

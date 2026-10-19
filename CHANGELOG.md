@@ -5,6 +5,8 @@
 - Enable sensor-driven, four-way auto-rotation for EPUB and TXT reading on devices
   with an IMU; stable-pose detection ignores flat, ambiguous, or unstable readings.
 - Assign Rotate Page CW to the Power button's long-press action.
+- Add opt-in, rate-limited rotation diagnostics with raw gravity, decision reasons,
+  applied renderer orientation, and numeric reading anchors.
 
 ### Fixed
 
@@ -17,6 +19,12 @@
   while hiding its device and web controls.
 - Defer auto-rotation until all screen contacts lift, including multi-finger and
   suppressed contacts, then require a fresh stable pose.
+- Accept stable inclined reading poses while still ignoring flat and rapidly
+  changing poses.
+- Reduce TXT reflow time with forward word fitting instead of repeated backward
+  paragraph scans. Preserve UTF-8 boundaries and source-byte positions during wrapping.
+- Preserve legacy TXT bookmarks before replacing version 4 page indexes.
+  If the bookmark update fails, keep the old index.
 
 ## [v1.6.1] - 2026-10-03
 
