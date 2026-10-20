@@ -1227,7 +1227,9 @@ class SimulatorSmokeTest {
     SETTINGS.orientation = CrossPointSettings::PORTRAIT;
     SETTINGS.textAntiAliasing = 0;  // Compare the same monochrome text body in the live and sleep render paths.
     simulatorClearAcceleration();
-    LOG_INF("SMOKE", "Auto-rotation uses synthetic gravity; this does not validate physical X3 axis signs");
+    LOG_INF("SMOKE",
+            "Auto-rotation replays measured X3 raw gravity, or canonical touch-device fixtures; "
+            "native execution does not independently validate physical mounting");
 
     if (rotationTouchGates) {
       SETTINGS.autoRotate = 1;
@@ -1330,9 +1332,23 @@ class SimulatorSmokeTest {
       action.powerHold = power;
       rotationScript.push_back(action);
     };
-    // Explicitly synthetic mapping, matching the application's documented X3
-    // assumption, not a claim that a native simulator proves board mounting.
-    constexpr float gravity[4][2] = {{1.0f, 0.0f}, {0.0f, -1.0f}, {-1.0f, 0.0f}, {0.0f, 1.0f}};
+    // Independent raw medians from one physical X3 with user-labelled poses:
+    // natural portrait, top of case right, and top of case left. Inverted is
+    // an ideal derived fixture, not a measured pose. Do not synthesize these
+    // inputs by inverting the production reader's axis correction.
+    constexpr float x3RawGravity[4][3] = {
+        {-0.9424f, 0.1135f, -0.2975f},  // Portrait.
+        {-0.0237f, 1.0777f, -0.1244f},  // Physical right: LANDSCAPE_CW.
+        {1.0f, 0.0f, 0.0f},             // Inverted (derived).
+        {0.0298f, -0.8653f, -0.2571f}   // Physical left: LANDSCAPE_CCW.
+    };
+    // Other device profiles retain the original canonical synthetic inputs.
+    constexpr float canonicalGravity[4][3] = {
+        {1.0f, 0.0f, 0.0f}, {0.0f, -1.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}};
+    const auto& gravity = gpio.deviceIsX3() ? x3RawGravity : canonicalGravity;
+    const auto addOrientationGravity = [&addGravity, &gravity](const uint8_t orientation) {
+      addGravity(gravity[orientation][0], gravity[orientation][1], gravity[orientation][2]);
+    };
     constexpr const char* autoNames[] = {"auto-portrait", "auto-cw", "auto-inverted", "auto-ccw"};
     constexpr const char* powerNames[] = {"power-portrait", "power-cw", "power-inverted", "power-ccw"};
     for (const bool txt : {false, true}) {
@@ -1373,9 +1389,25 @@ class SimulatorSmokeTest {
         }
         continue;
       }
-      addGravity(0.0f, -1.0f, 0.0f);
+      addOrientationGravity(CrossPointSettings::LANDSCAPE_CW);
       observe(1100, CrossPointSettings::PORTRAIT);
       rotationScript.push_back({RotationActionType::EnableAuto});
+      if (gpio.deviceIsX3()) {
+        // Replay the independently labelled physical sequence before synthetic
+        // motion/flat controls. Assert the required device-pose orientations,
+        // including portrait after returning from each landscape direction.
+        addOrientationGravity(CrossPointSettings::PORTRAIT);
+        observe(750, CrossPointSettings::PORTRAIT);
+        addOrientationGravity(CrossPointSettings::LANDSCAPE_CCW);
+        observe(350, CrossPointSettings::PORTRAIT);
+        awaitOrientation(CrossPointSettings::LANDSCAPE_CCW, "measured-x3-left");
+        addOrientationGravity(CrossPointSettings::PORTRAIT);
+        awaitOrientation(CrossPointSettings::PORTRAIT, "measured-x3-return-portrait");
+        addOrientationGravity(CrossPointSettings::LANDSCAPE_CW);
+        awaitOrientation(CrossPointSettings::LANDSCAPE_CW, "measured-x3-right");
+        addOrientationGravity(CrossPointSettings::PORTRAIT);
+        awaitOrientation(CrossPointSettings::PORTRAIT, "measured-x3-final-portrait");
+      }
       addGravity(0.0f, 0.0f, 1.0f);  // Face-up/flat.
       observe(750, CrossPointSettings::PORTRAIT);
       addGravity(0.7f, -0.7f, 0.0f);  // Ambiguous diagonal.
@@ -1392,7 +1424,7 @@ class SimulatorSmokeTest {
       observe(200, CrossPointSettings::PORTRAIT);
       uint8_t previous = CrossPointSettings::PORTRAIT;
       for (const uint8_t target : {uint8_t(1), uint8_t(2), uint8_t(3), uint8_t(0)}) {
-        addGravity(gravity[target][0], gravity[target][1], 0.0f);
+        addOrientationGravity(target);
         observe(350, previous);
         awaitOrientation(target, autoNames[target]);
         if (txt) {
@@ -1414,13 +1446,13 @@ class SimulatorSmokeTest {
       rotationScript.push_back({RotationActionType::EnableAuto});
       rotationScript.push_back({RotationActionType::OpenOverlay});
       rotationScript.push_back({RotationActionType::AwaitOverlay, 5000});
-      addGravity(0.0f, -1.0f, 0.0f);
+      addOrientationGravity(CrossPointSettings::LANDSCAPE_CW);
       observe(1100, CrossPointSettings::PORTRAIT, true);
       rotationScript.push_back({RotationActionType::CloseOverlay});
       rotationScript.push_back({RotationActionType::AwaitReader, 5000});
       observe(350, CrossPointSettings::PORTRAIT);
       awaitOrientation(CrossPointSettings::LANDSCAPE_CW, "auto-after-overlay");
-      addGravity(1.0f, 0.0f, 0.0f);
+      addOrientationGravity(CrossPointSettings::PORTRAIT);
       awaitOrientation(CrossPointSettings::PORTRAIT, "auto-return-portrait");
     }
     rotationSettingsConfigured = true;
@@ -1457,7 +1489,7 @@ class SimulatorSmokeTest {
                 "partial releases, suppressed contact and fresh post-release stability");
       } else {
         LOG_INF("SMOKE",
-                "Synthetic auto-rotation passed: EPUB/TXT content anchors, four orientations, settings, "
+                "Auto-rotation replay passed: EPUB/TXT content anchors, four orientations, settings, "
                 "Power hold/release, disabled/flat/noise and foreground overlay gates");
       }
       LOG_INF("SMOKE", "Simulator smoke test passed");

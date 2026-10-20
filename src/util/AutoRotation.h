@@ -87,9 +87,9 @@ class AutoRotation {
   bool emitted_ = false;
 
   static uint8_t orientationFor(float ax, float ay) {
-    // Current canonical mapping used by the firmware and synthetic controls.
-    // Physical X3 mounting and signs still need four-way validation:
-    // +X portrait, -Y clockwise, -X inverted, +Y counterclockwise.
+    // Canonical classifier coordinates: +X portrait, -Y clockwise,
+    // -X inverted, +Y counterclockwise. ReaderUtils adapts raw X3 samples
+    // to this frame; other device profiles keep their existing inputs.
     if (std::fabs(ax) > std::fabs(ay)) {
       return ax > 0.0f ? 0 : 2;
     }

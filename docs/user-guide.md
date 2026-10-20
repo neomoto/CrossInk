@@ -798,6 +798,14 @@ before the page reflows. Inclined reading poses are allowed. Nearly flat,
 diagonal, and unstable poses do not rotate the page. The reading passage stays
 visible across portrait, landscape, and inverted orientations.
 
+On X3, natural portrait selects **Portrait**, turning the case top left selects
+**Landscape CCW**, and turning it right selects **Landscape CW**. Its auto-rotation
+input correction is based on labelled raw measurements from one physical X3
+(portrait negative X, left negative Y, right positive Y); it does not change gyro
+page turning or manual rotation. See the
+[physical check](./simulator.md#physical-x3-check) for measurement and verification
+limits.
+
 Menus, locks, active button/touch interactions, and pre-rendered XTC pages do not
 auto-rotate. To rotate manually instead, assign **Rotate Page CW** under
 **Settings > Controls > Power Button > Long-press Action**. An enabled sensor

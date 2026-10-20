@@ -70,9 +70,12 @@ CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION_CAPTURES=/tmp/crossink-rotation-captures 
 ```
 
 The scenario changes and reloads the production settings, drives physical button
-edges, and supplies synthetic gravity through the simulator HAL. It exercises
-EPUB and TXT four-way auto-rotation, one rotation per Power hold, short-action
-suppression on long release, invalid/flat/noisy input, and foreground overlays.
+edges, and supplies gravity through the simulator HAL. The X3 profile replays
+independently measured raw portrait/left/right samples from one physical device;
+inverted remains an ideal derived fixture. Other profiles retain canonical
+synthetic inputs. It exercises EPUB and TXT four-way auto-rotation, one rotation
+per Power hold, short-action suppression on long release, invalid/flat/noisy
+input, and foreground overlays.
 Rendered content ranges keep a fixed nonzero reading anchor visible. TXT sleep
 reconstruction is compared against the live rotated text body. PGM captures and
 JSON orientation/viewport/content receipts are saved in the capture directory.
@@ -122,12 +125,36 @@ and screenshots, not successful orientation assignments alone.
 
 ### Physical X3 Check
 
-Synthetic gravity does **not** establish the X3's physical mounting signs.
-The current isolated mapping assumes `+ax` is Portrait, `-ay` is Landscape CW,
-`-ax` is Portrait 180, and `+ay` is Landscape CCW. This mapping has not yet been
-measured on a physical X3.
+Native replay does **not** independently establish physical mounting signs.
+The X3 fixture now uses raw median acceleration measured on one physical X3
+during user-labelled portrait → case-top-left → portrait → case-top-right poses,
+plus an explicitly confirmed natural portrait hold:
 
-Before treating the build as hardware-verified:
+| Physical pose | Raw ax, ay, az (g) | Required reading orientation |
+| --- | --- | --- |
+| Natural portrait | `-0.9424, +0.1135, -0.2975` | Portrait (`0`) |
+| Case top left | `+0.0298, -0.8653, -0.2571` | Landscape CCW (`3`) |
+| Case top right | `-0.0237, +1.0777, -0.1244` | Landscape CW (`1`) |
+| Inverted (derived, not measured) | `+1, 0, 0` | Portrait 180 (`2`) |
+
+`ReaderUtils` negates raw X and Y only for X3 auto-rotation, leaving Z unchanged.
+The generic classifier still uses canonical `+X` Portrait, `-Y` Landscape CW,
+`-X` Portrait 180, and `+Y` Landscape CCW. Raw diagnostic samples, gyro page turns,
+manual controls, and other device profiles are unchanged.
+
+The permanent native regression replays the labelled portrait → left → portrait
+→ right sequence before the existing synthetic rejection controls. It checks
+the actual reader path, not a second copy of the correction. With the old reader
+code, this raw replay failed while awaiting left's required Landscape CCW (`3`).
+With the X3 correction, the full native scenario passed: both
+EPUB and TXT reached left `3` → portrait `0` → right `1` → portrait `0`, retained
+their reading anchors, and passed the existing manual Power, disabled/flat/noisy
+input, overlay and TXT sleep-reconstruction checks. The relevant native test
+selection also passed all 78 tests. These are host-only results, not physical
+screen acceptance. The measurements establish input signs on one device, not
+fleet-wide hardware qualification or proof that the corrected firmware renders
+upright on its physical screen.
+Before treating the corrected build as hardware-verified:
 
 1. With auto-rotation off, assign **Rotate Page CW** to Power long-press and
    **Next Page** to short-press. From the middle of a book, hold and release:
@@ -150,8 +177,9 @@ the environment's existing build flags. Serial logging must be enabled with
 `LOG_LEVEL` at least `1`. For the native X3 profile, the define can be added
 through `build_src_flags` in `platformio.local.ini`.
 
-`ROT` records contain consumed acceleration in g, current/candidate/accepted
-orientations, rejection or gating reasons, and stable-hold time. Ordinary
+`ROT` records contain consumed **raw** acceleration in g (before the X3-only
+auto-rotation correction), current/candidate/accepted orientations, rejection
+or gating reasons, and stable-hold time. Ordinary
 sample/gate/gap records share a four-per-second limit; accepted decisions and
 applied rotations are recorded immediately. EPUB/TXT application records include
 the actual and expected renderer orientation plus numeric reading anchors.

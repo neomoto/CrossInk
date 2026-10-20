@@ -3,6 +3,7 @@
 #include <CrossPointSettings.h>
 #include <GfxRenderer.h>
 #include <HalClock.h>
+#include <HalGPIO.h>
 #include <HalTiltSensor.h>
 #include <Logging.h>
 
@@ -225,12 +226,19 @@ inline bool takeAutoRotation(const MappedInputManager& input, uint8_t& targetOri
       return false;
     }
   }
+  // One physical X3's labelled poses measured portrait=-X, left=-Y,
+  // right=+Y. Correct its 180-degree in-plane sensor mounting only for
+  // auto-rotation; retain raw samples for diagnostics and other IMU users.
+  const bool x3 = gpio.deviceIsX3();
+  const float policyAx = x3 ? -ax : ax;
+  const float policyAy = x3 ? -ay : ay;
 #if defined(CROSSINK_ROTATION_DIAGNOSTICS) && CROSSINK_ROTATION_DIAGNOSTICS
-  const bool accepted = autoRotationPolicy().update(ax, ay, az, now, SETTINGS.orientation, targetOrientation);
+  const bool accepted =
+      autoRotationPolicy().update(policyAx, policyAy, az, now, SETTINGS.orientation, targetOrientation);
   logAutoRotationSample(now, ax, ay, az, consumedGapMs, targetOrientation, accepted);
   return accepted;
 #else
-  return autoRotationPolicy().update(ax, ay, az, millis(), SETTINGS.orientation, targetOrientation);
+  return autoRotationPolicy().update(policyAx, policyAy, az, millis(), SETTINGS.orientation, targetOrientation);
 #endif
 }
 

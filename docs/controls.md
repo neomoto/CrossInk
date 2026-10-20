@@ -186,9 +186,13 @@ must settle for another half-second. If auto-rotation stays enabled, a stable
 physical pose can override a manual rotation after the interaction ends. Disable
 it when you want to keep a manually chosen orientation.
 
-This development build's physical X3 axis mapping still needs device validation.
-See [rotation verification](./simulator.md#rotation-verification) before treating
-simulator results as hardware proof.
+The X3 auto-rotation input corrects a 180-degree in-plane sensor mounting using
+labelled measurements from one physical device: natural portrait has negative
+raw X, case top tilted left has negative raw Y, and case top tilted right has
+positive raw Y. Those poses select Portrait, Landscape CCW, and Landscape CW,
+respectively. This correction does not change tilt page turns or manual controls.
+See [rotation verification](./simulator.md#rotation-verification) for the measured
+fixtures and remaining physical checks; native replay is not hardware proof.
 
 ## Power, Back, and Menu Button Actions
 

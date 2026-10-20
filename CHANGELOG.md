@@ -10,6 +10,10 @@
 
 ### Fixed
 
+- Correct the X3's 180-degree in-plane sensor mounting for automatic EPUB/TXT
+  rotation using labelled portrait/left/right measurements from one physical
+  device. Keep raw diagnostics, gyro page turning, manual rotation, and other
+  device profiles unchanged.
 - Keep handled Power holds suppressed through release, without running the short
   action in another input consumer.
 - Keep the same reading passage visible through consecutive orientation changes.
