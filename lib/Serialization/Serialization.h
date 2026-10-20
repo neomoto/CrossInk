@@ -54,6 +54,26 @@ static bool tryReadPod(FsFile& file, T& value) {
   return file.read(reinterpret_cast<uint8_t*>(&value), sizeof(T)) == sizeof(T);
 }
 
+// Decode only complete short records, leaving every output unchanged on a short
+// read. Copy fields individually so wire bytes never depend on struct padding.
+template <typename... Ts>
+static bool tryReadPodGroup(FsFile& file, Ts&... values) {
+  static_assert((std::is_trivially_copyable<Ts>::value && ...), "Fields must be trivially copyable");
+  constexpr size_t byteCount = (sizeof(Ts) + ...);
+  static_assert(byteCount <= 64, "Use direct reads for larger payloads");
+  uint8_t bytes[byteCount];
+  if (file.read(bytes, byteCount) != static_cast<int>(byteCount)) {
+    return false;
+  }
+  size_t offset = 0;
+  const auto extract = [&](auto& value) {
+    std::memcpy(&value, bytes + offset, sizeof(value));
+    offset += sizeof(value);
+  };
+  (extract(values), ...);
+  return true;
+}
+
 static void writeString(std::ostream& os, const std::string& s) {
   const uint32_t len = s.size();
   writePod(os, len);

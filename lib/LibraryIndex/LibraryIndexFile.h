@@ -119,6 +119,8 @@ class LibraryIndexFile {
 
  private:
   bool openImpl(const char* path, bool acceptStaleFold);
+  bool seekTo(uint32_t offset);
+  bool readNext(void* dst, size_t len);
   bool readAt(uint32_t offset, void* dst, size_t len);
   bool readBlobField(const ClixRecord& record, uint8_t field, std::string& out);
   bool readBlobFieldAt(uint32_t& at, std::string* out);

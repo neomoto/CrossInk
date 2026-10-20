@@ -50,16 +50,27 @@ void LibraryIndexFile::close() {
   opened = false;
 }
 
-bool LibraryIndexFile::readAt(const uint32_t offset, void* dst, const size_t len) {
+bool LibraryIndexFile::seekTo(const uint32_t offset) {
   if (!opened) return false;
-  // Every offset handed to this function comes from the header, and the header
-  // was validated against the real file size, so a short read means the card
-  // changed under us rather than a bad computation.
-  if (!file.seekSet(offset) || file.read(dst, len) != static_cast<int>(len)) {
+  if (!file.seekSet(offset)) {
     readFailed = true;
     return false;
   }
   return true;
+}
+
+bool LibraryIndexFile::readNext(void* dst, const size_t len) {
+  if (file.read(dst, len) != static_cast<int>(len)) {
+    readFailed = true;
+    return false;
+  }
+  return true;
+}
+
+bool LibraryIndexFile::readAt(const uint32_t offset, void* dst, const size_t len) {
+  // Header-derived offsets were checked against the real file size. A failed
+  // seek or short read means the card changed under us, not a bad computation.
+  return seekTo(offset) && readNext(dst, len);
 }
 
 uint16_t LibraryIndexFile::ordinalForRow(const SortOrder order, const uint16_t row) {
@@ -224,12 +235,14 @@ bool LibraryIndexFile::readPathHash(const ClixRecord& record, uint64_t& out) {
 bool LibraryIndexFile::readBlobFieldAt(uint32_t& at, std::string* out) {
   if (at >= head.nameLen) return false;
   uint8_t len = 0;
-  if (!readAt(head.nameStart + at, &len, sizeof(len))) return false;
+  if (!readNext(&len, sizeof(len))) return false;
   ++at;
   if (len > head.nameLen - at) return false;
   if (out) {
     out->resize(len);
-    if (len != 0 && !readAt(head.nameStart + at, out->data(), len)) return false;
+    if (len != 0 && !readNext(out->data(), len)) return false;
+  } else if (len != 0 && !seekTo(head.nameStart + at + len)) {
+    return false;
   }
   at += len;
   return true;
@@ -237,15 +250,17 @@ bool LibraryIndexFile::readBlobFieldAt(uint32_t& at, std::string* out) {
 
 bool LibraryIndexFile::readBlobFields(const ClixRecord& record, std::string* const* fields, const uint8_t count,
                                       uint32_t* seriesPosition) {
-  if (!opened || record.nameOff > head.nameLen || sizeof(uint64_t) + record.nameLen > head.nameLen - record.nameOff)
+  if (!opened || record.nameOff > head.nameLen || sizeof(uint64_t) + record.nameLen >= head.nameLen - record.nameOff)
     return false;
   uint32_t at = record.nameOff + sizeof(uint64_t) + record.nameLen;
+  // The selected fields and their prefixes are adjacent. Only unrequested
+  // payloads need another seek; no cursor state survives this call.
+  if (!seekTo(head.nameStart + at)) return false;
   for (uint8_t i = 0; i < count; i++) {
     if (!readBlobFieldAt(at, fields[i])) return false;
   }
   if (!seriesPosition) return true;
-  return at <= head.nameLen && sizeof(*seriesPosition) <= head.nameLen - at &&
-         readAt(head.nameStart + at, seriesPosition, sizeof(*seriesPosition));
+  return sizeof(*seriesPosition) <= head.nameLen - at && readNext(seriesPosition, sizeof(*seriesPosition));
 }
 
 bool LibraryIndexFile::readBlobField(const ClixRecord& record, const uint8_t field, std::string& out) {

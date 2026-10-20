@@ -3,6 +3,7 @@
 #include <GfxRenderer.h>
 #include <SdCardFont.h>
 #include <TouchReaderPreviewModel.h>
+#include <esp_heap_caps.h>
 #include <gtest/gtest.h>
 
 #include <array>
@@ -320,3 +321,339 @@ TEST(EpubTextGrayscaleTest, ColdSdSamplePreviewMatchesFullyLoadedFont) {
     }
   }
 }
+
+namespace {
+// Each face has different source pixels and may have a different packed format.
+// The oracle below generates pixels independently rather than asking the family
+// to choose a glyph or calling the production bitmap/scaling helpers.
+struct ResolutionRasterFace {
+  std::vector<uint32_t> codepoints;
+  std::vector<EpdUnicodeInterval> intervals;
+  std::vector<EpdGlyph> glyphs;
+  std::vector<uint8_t> pixels;
+  EpdFontData data{};
+  EpdFont font{&data};
+  int seed;
+
+  ResolutionRasterFace(std::initializer_list<uint32_t> cps, const bool twoBit, const int patternSeed)
+      : codepoints(cps), seed(patternSeed) {
+    for (const uint32_t cp : codepoints) {
+      intervals.push_back({cp, cp, static_cast<uint32_t>(glyphs.size())});
+      EpdGlyph glyph{5, 5, 128, -1, 4, static_cast<uint16_t>(twoBit ? 7 : 4), static_cast<uint32_t>(pixels.size())};
+      pixels.resize(pixels.size() + glyph.dataLength, 0);
+      for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < 5; ++x) {
+          const int pos = y * 5 + x;
+          const unsigned raw = source(cp, x, y, twoBit);
+          const int shift = twoBit ? (3 - pos % 4) * 2 : 7 - pos % 8;
+          pixels[glyph.dataOffset + pos / (twoBit ? 4 : 8)] |= raw << shift;
+        }
+      }
+      glyphs.push_back(glyph);
+    }
+    data.bitmap = pixels.data();
+    data.glyph = glyphs.data();
+    data.intervals = intervals.data();
+    data.intervalCount = intervals.size();
+    data.advanceY = 10;
+    data.ascender = 8;
+    data.is2Bit = twoBit;
+  }
+
+  unsigned source(const uint32_t cp, const int x, const int y, const bool twoBit) const {
+    return (cp + seed + x * 3 + y * 2) % (twoBit ? 4 : 2);
+  }
+};
+
+enum class ResolutionScale { Full, Half, SmallCap };
+
+int resolutionScaleValue(const ResolutionScale scale, const int full, const int half, const int smallCap) {
+  if (scale == ResolutionScale::Full) return full;
+  return scale == ResolutionScale::Half ? half : smallCap;
+}
+
+std::pair<int, int> resolutionSourceRange(const int destination, const ResolutionScale scale) {
+  if (scale == ResolutionScale::Full) return {destination, destination + 1};
+  if (scale == ResolutionScale::Half) return {destination * 2, std::min(5, destination * 2 + 2)};
+  return {destination * 4 / 3, std::min(5, ((destination + 1) * 4 + 2) / 3)};
+}
+
+std::pair<unsigned, unsigned> resolutionCoverage(const ResolutionRasterFace& face, const uint32_t cp, const int x,
+                                                 const int y, const ResolutionScale scale) {
+  const auto [sx, ex] = resolutionSourceRange(x, scale);
+  const auto [sy, ey] = resolutionSourceRange(y, scale);
+  unsigned maximum = 0, total = 0;
+  for (int by = sy; by < ey; ++by) {
+    for (int bx = sx; bx < ex; ++bx) {
+      const unsigned raw = face.source(cp, bx, by, face.data.is2Bit);
+      maximum = std::max(maximum, raw);
+      total += raw;
+    }
+  }
+  return {maximum, total};
+}
+
+bool resolutionHasInk(const bool twoBit, const ResolutionScale scale, const GfxRenderer::RenderMode mode,
+                      const unsigned maximum, const unsigned total) {
+  if (!twoBit) return maximum != 0;
+  if (scale == ResolutionScale::Half) return maximum >= 2 || total >= 2;
+  if (mode == GfxRenderer::BW) return maximum != 0;
+  if (mode == GfxRenderer::GRAYSCALE_LSB) return maximum == 2;
+  return maximum == 1 || maximum == 2;
+}
+
+void paintResolutionPixel(std::vector<uint8_t>& expected, const HalDisplay& display, const int orientation, const int x,
+                          const int y, const bool black) {
+  int px = x, py = y;
+  switch (orientation) {
+    case 0:
+      px = y;
+      py = display.height - 1 - x;
+      break;
+    case 1:
+      px = display.width - 1 - x;
+      py = display.height - 1 - y;
+      break;
+    case 2:
+      px = display.width - 1 - y;
+      py = x;
+      break;
+    default:
+      break;
+  }
+  if (px < 0 || py < 0 || px >= display.width || py >= display.height) return;
+  auto& byte = expected[py * display.stride + px / 8];
+  const uint8_t mask = 0x80 >> (px % 8);
+  if (black)
+    byte &= static_cast<uint8_t>(~mask);
+  else
+    byte |= mask;
+}
+
+void paintResolutionGlyph(std::vector<uint8_t>& expected, const HalDisplay& display, const int orientation,
+                          const ResolutionRasterFace& face, const uint32_t cp, const int cursorX, const int cursorY,
+                          const bool rotated, const ResolutionScale scale, const GfxRenderer::RenderMode mode,
+                          const bool state) {
+  const int extent = resolutionScaleValue(scale, 5, 3, 4);
+  const int left = resolutionScaleValue(scale, -1, 0, 0);
+  const int top = resolutionScaleValue(scale, 4, 2, 3);
+  const bool binary = !face.data.is2Bit || scale == ResolutionScale::Half;
+  const bool black = state && (binary || mode == GfxRenderer::BW);
+  for (int y = 0; y < extent; ++y) {
+    for (int x = 0; x < extent; ++x) {
+      const auto [maximum, total] = resolutionCoverage(face, cp, x, y, scale);
+      if (!resolutionHasInk(face.data.is2Bit, scale, mode, maximum, total)) continue;
+      const int px = rotated ? cursorX + 8 - top + y : cursorX + left + x;
+      const int py = rotated ? cursorY - left - x : cursorY - top + y;
+      paintResolutionPixel(expected, display, orientation, px, py, black);
+    }
+  }
+}
+
+TEST(EpubTextRaster, MatchedStyleRegularFallbackAliasAndMissingMarkHaveIndependentPixels) {
+  for (const bool twoBit : {false, true}) {
+    ResolutionRasterFace regular({'A', 'M', 'R', 0x2018, 0xFFFD}, twoBit, 1);
+    ResolutionRasterFace bold({'B', 'M'}, !twoBit, 2);
+    ResolutionRasterFace fallback({'F', 'Q', 0x302}, twoBit, 3);
+    HalDisplay display(64, 64);
+    GfxRenderer renderer(display);
+    renderer.begin();
+    renderer.insertFont(1, EpdFontFamily(&regular.font, &bold.font, nullptr, nullptr, &fallback.font));
+    for (int orientation = 0; orientation < 4; ++orientation) {
+      renderer.setOrientation(GfxRenderer::Orientation(orientation));
+      for (const bool rotated : {false, true}) {
+        for (const bool black : {false, true}) {
+          for (auto mode : {GfxRenderer::BW, GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+            SCOPED_TRACE(testing::Message()
+                         << twoBit << ' ' << orientation << ' ' << rotated << ' ' << black << ' ' << mode);
+            renderer.setRenderMode(mode);
+            renderer.clearScreen(0xA5);
+            auto expected = display.bw;
+            const std::array<std::pair<const ResolutionRasterFace*, uint32_t>, 7> bases = {{{&bold, 'B'},
+                                                                                            {&regular, 'A'},
+                                                                                            {&regular, 'R'},
+                                                                                            {&fallback, 'F'},
+                                                                                            {&regular, 0x2018},
+                                                                                            {&fallback, 'Q'},
+                                                                                            {&bold, 'B'}}};
+            for (int i = 0; i < 7; ++i) {
+              paintResolutionGlyph(expected, display, orientation, *bases[i].first, bases[i].second,
+                                   rotated ? 10 : 6 + i * 8, rotated ? 58 - i * 8 : 24, rotated, ResolutionScale::Full,
+                                   mode, black);
+            }
+            for (auto [face, cp] : {std::pair{&fallback, 0x302u}, std::pair{&regular, 0xFFFDu}}) {
+              paintResolutionGlyph(expected, display, orientation, *face, cp, rotated ? 10 : 46, rotated ? 18 : 24,
+                                   rotated, ResolutionScale::Full, mode, black);
+            }
+            if (rotated)
+              renderer.drawTextRotated90CW(1, 10, 58, "BARF\u02BBQ\u0302\u0303B", black, EpdFontFamily::BOLD);
+            else
+              renderer.drawText(1, 6, 16, "BARF\u02BBQ\u0302\u0303B", black, EpdFontFamily::BOLD);
+            EXPECT_EQ(display.bw, expected);
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(EpubTextRaster, ScaledFallbackRetainsItsOwnBitmapFormatAndOwner) {
+  for (const bool twoBit : {false, true}) {
+    ResolutionRasterFace regular({'A', 'M', 'R'}, twoBit, 1);
+    ResolutionRasterFace bold({'M'}, !twoBit, 2);
+    ResolutionRasterFace fallback({'F'}, twoBit, 3);
+    HalDisplay display(64, 64);
+    GfxRenderer renderer(display);
+    renderer.begin();
+    renderer.insertFont(1, EpdFontFamily(&regular.font, &bold.font, nullptr, nullptr, &fallback.font));
+    for (int orientation = 0; orientation < 4; ++orientation) {
+      renderer.setOrientation(GfxRenderer::Orientation(orientation));
+      for (const auto overlay : {EpdFontFamily::SUP, EpdFontFamily::SUB, EpdFontFamily::SMALL_CAPS}) {
+        const bool small = overlay == EpdFontFamily::SMALL_CAPS;
+        for (auto mode : {GfxRenderer::BW, GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+          SCOPED_TRACE(testing::Message() << twoBit << ' ' << orientation << ' ' << overlay << ' ' << mode);
+          renderer.setRenderMode(mode);
+          renderer.clearScreen(0xA5);
+          auto expected = display.bw;
+          int x = 10;
+          for (auto [face, cp] : {std::pair{&regular, 'A'}, std::pair{&regular, 'R'}, std::pair{&fallback, 'F'}}) {
+            paintResolutionGlyph(expected, display, orientation, *face, cp, x, 24, false,
+                                 small ? ResolutionScale::SmallCap : ResolutionScale::Half, mode, true);
+            x += small ? 6 : 4;
+          }
+          renderer.drawText(1, 10, 16, small ? "arf" : "ARF", true,
+                            EpdFontFamily::Style(EpdFontFamily::BOLD | overlay));
+          EXPECT_EQ(display.bw, expected);
+        }
+      }
+    }
+  }
+}
+
+TEST(EpubTextRaster, MissingSpaceAndMissingMarkPreservePreviousAdvanceWithoutSyntheticMarkInk) {
+  ResolutionRasterFace face({'A', 'B', 'M'}, true, 4);
+  HalDisplay display(64, 64);
+  GfxRenderer renderer(display);
+  renderer.begin();
+  renderer.insertFont(1, EpdFontFamily(&face.font));
+  for (int orientation = 0; orientation < 4; ++orientation) {
+    renderer.setOrientation(GfxRenderer::Orientation(orientation));
+    for (const bool rotated : {false, true}) {
+      for (auto mode : {GfxRenderer::BW, GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB}) {
+        renderer.setRenderMode(mode);
+        renderer.clearScreen(0xA5);
+        auto expected = display.bw;
+        paintResolutionGlyph(expected, display, orientation, face, 'A', 10, rotated ? 54 : 24, rotated,
+                             ResolutionScale::Full, mode, true);
+        paintResolutionGlyph(expected, display, orientation, face, 'B', rotated ? 10 : 18, rotated ? 46 : 24, rotated,
+                             ResolutionScale::Full, mode, true);
+        if (rotated)
+          renderer.drawTextRotated90CW(1, 10, 54, "A\u2007\u0303B", true);
+        else
+          renderer.drawText(1, 10, 16, "A\u2007\u0303B", true);
+        EXPECT_EQ(display.bw, expected);
+      }
+    }
+  }
+}
+
+#if CROSSINK_SCALABLE_FONTS
+struct EvictingResolutionFont {
+  ResolutionRasterFace source{{'A', 'B', 0x301, 0x2018, 0xFFFD}, true, 5};
+  EpdGlyph slot{};
+  std::array<uint8_t, 7> bitmap{};
+  EpdFontData data{};
+  EpdFont font{&data};
+
+  EvictingResolutionFont() {
+    data.ascender = 8;
+    data.advanceY = 10;
+    data.is2Bit = true;
+    data.glyphMissCtx = this;
+    data.dynamicGlyphHandler = [](void* ctx, const uint32_t cp) -> const EpdGlyph* {
+      auto& self = *static_cast<EvictingResolutionFont*>(ctx);
+      self.slot = {};
+      self.bitmap.fill(0);
+      const auto it = std::find(self.source.codepoints.begin(), self.source.codepoints.end(), cp);
+      if (it == self.source.codepoints.end()) return nullptr;
+      const auto index = static_cast<size_t>(it - self.source.codepoints.begin());
+      self.slot = self.source.glyphs[index];
+      std::copy_n(self.source.pixels.data() + self.slot.dataOffset, self.bitmap.size(), self.bitmap.data());
+      self.slot.dataOffset = cp;
+      return &self.slot;
+    };
+    data.kerningHandler = [](void* ctx, uint32_t, const uint32_t right) -> int8_t {
+      auto& self = *static_cast<EvictingResolutionFont*>(ctx);
+      // Model a callback faulting other glyphs into the same ring and pixels.
+      self.slot = {1, 1, 16, 9, 9, 1, 0};
+      self.bitmap.fill(0);
+      return right == 0xFFFD ? 0 : right == 0x2018 ? -32 : -16;
+    };
+    data.bitmapHandler = [](void* ctx, const EpdGlyph* glyph) -> const uint8_t* {
+      auto& self = *static_cast<EvictingResolutionFont*>(ctx);
+      if (glyph != &self.slot || self.slot.dataOffset == 0) return nullptr;
+      // A bitmap request may also reuse the metrics slot. Placement/advance
+      // must already have been consumed, while the returned pixels stay valid.
+      self.slot = {1, 1, 16, 9, 9, 1, 0};
+      return self.bitmap.data();
+    };
+  }
+};
+
+int resolutionKernedStep(const ResolutionScale scale, const uint32_t right) {
+  const int advance = resolutionScaleValue(scale, 8, 4, 6);
+  if (right == 0xFFFD) return advance;
+  return advance - (right == 0x2018 ? 2 : 1);
+}
+
+void checkEvictingResolutionRaster(const int orientation, const bool rotated, const EpdFontFamily::Style overlay,
+                                   const GfxRenderer::RenderMode mode) {
+  SCOPED_TRACE(testing::Message() << orientation << ' ' << rotated << ' ' << overlay << ' ' << mode);
+  EvictingResolutionFont fixture;
+  HalDisplay display(64, 64);
+  GfxRenderer renderer(display);
+  renderer.begin();
+  renderer.insertFont(1, EpdFontFamily(&fixture.font));
+  renderer.setOrientation(GfxRenderer::Orientation(orientation));
+  renderer.setRenderMode(mode);
+  renderer.clearScreen(0xA5);
+  auto expected = display.bw;
+  const bool small = overlay == EpdFontFamily::SMALL_CAPS;
+  const auto scale = overlay == EpdFontFamily::SUP ? ResolutionScale::Half
+                     : small                       ? ResolutionScale::SmallCap
+                                                   : ResolutionScale::Full;
+  const std::vector<uint32_t> cps =
+      small ? std::vector<uint32_t>{'A', 'B', 0xFFFD, 'B'} : std::vector<uint32_t>{'A', 'B', 0x2018, 0xFFFD, 'B'};
+  int offset = 0;
+  for (size_t i = 0; i < cps.size(); ++i) {
+    if (i != 0) offset += resolutionKernedStep(scale, cps[i]);
+    paintResolutionGlyph(expected, display, orientation, fixture.source, cps[i], rotated ? 10 : 10 + offset,
+                         rotated ? 54 - offset : 24, rotated, scale, mode, true);
+  }
+  if (!small) {
+    // Combining overlays keep the unscaled base metrics even in SUP text.
+    paintResolutionGlyph(expected, display, orientation, fixture.source, 0x301,
+                         rotated ? 10 : 10 + 2 * resolutionScaleValue(scale, 7, 3, 5) - 1,
+                         rotated ? 55 - 2 * resolutionScaleValue(scale, 7, 3, 5) : 24, rotated, ResolutionScale::Full,
+                         mode, true);
+  }
+  if (rotated)
+    renderer.drawTextRotated90CW(1, 10, 54, "AB\u02BB\u0301ZB", true);
+  else
+    renderer.drawText(1, 10, 16, small ? "abzb" : "AB\u02BB\u0301ZB", true, overlay);
+  EXPECT_EQ(display.bw, expected);
+}
+
+TEST(EpubTextRaster, DynamicKerningAndBitmapEvictionsPreserveIdentityPlacementAndFollowingAdvance) {
+  for (int orientation = 0; orientation < 4; ++orientation) {
+    for (const bool rotated : {false, true}) {
+      for (const auto overlay : {EpdFontFamily::REGULAR, EpdFontFamily::SUP, EpdFontFamily::SMALL_CAPS}) {
+        if (rotated && overlay != EpdFontFamily::REGULAR) continue;
+        for (auto mode : {GfxRenderer::BW, GfxRenderer::GRAYSCALE_LSB, GfxRenderer::GRAYSCALE_MSB})
+          checkEvictingResolutionRaster(orientation, rotated, overlay, mode);
+      }
+    }
+  }
+}
+#endif
+}  // namespace

@@ -396,6 +396,98 @@ void testGlyphLookup() {
   PASS();
 }
 
+static const EpdGlyph* referenceIntervalGlyph(const EpdFontData& data, const uint32_t cp) {
+  // Independent linear membership oracle: no upper_bound or binary-search
+  // candidate calculation is shared with the production interval lookup.
+  for (uint32_t i = 0; i < data.intervalCount; ++i) {
+    const auto& interval = data.intervals[i];
+    if (cp >= interval.first && cp <= interval.last) {
+      return &data.glyph[interval.offset + cp - interval.first];
+    }
+  }
+  return nullptr;
+}
+
+static bool checkIntervalLookup(const EpdFontData& data, const uint32_t cp) {
+  const EpdFont font(&data);
+  const auto* expected = referenceIntervalGlyph(data, cp);
+  if (font.findGlyph(cp) != expected || font.hasCodepoint(cp) != (expected != nullptr)) {
+    fprintf(stderr, "  Interval lookup mismatch: count=%u, codepoint=%08x\n", data.intervalCount, cp);
+    return false;
+  }
+  return true;
+}
+
+void testIntervalLookupEndpointsGapsAndWideCodepoints() {
+  printf("testIntervalLookupEndpointsGapsAndWideCodepoints...\n");
+  static const EpdGlyph glyphs[22]{};
+  static const EpdUnicodeInterval intervals[] = {{0, 2, 5},
+                                                 {0x20, 0x20, 0},
+                                                 {0x7F, 0x81, 14},
+                                                 {0xFFFD, 0xFFFF, 8},
+                                                 {0x10000, 0x10002, 2},
+                                                 {0x1F600, 0x1F602, 11},
+                                                 {0x10FFFD, 0x10FFFF, 17},
+                                                 {0xFFFFFFFE, 0xFFFFFFFF, 20}};
+  constexpr uint32_t queries[] = {
+      0,       1,       2,       3,        0x1F,     0x20,     0x21,     0x7E,     0x7F,       0x80,       0x81,
+      0x82,    0xFFFC,  0xFFFD,  0xFFFE,   0xFFFF,   0x10000,  0x10001,  0x10002,  0x10003,    0x1F5FF,    0x1F600,
+      0x1F601, 0x1F602, 0x1F603, 0x10FFFC, 0x10FFFD, 0x10FFFE, 0x10FFFF, 0x110000, 0xFFFFFFFD, 0xFFFFFFFE, 0xFFFFFFFF};
+  EpdFontData data = makeMetricsFontData(glyphs, intervals, 0);
+  for (uint32_t count = 0; count <= sizeof(intervals) / sizeof(intervals[0]); ++count) {
+    data.intervalCount = count;
+    for (const uint32_t cp : queries) {
+      ASSERT_TRUE(checkIntervalLookup(data, cp));
+    }
+  }
+  data.glyph = nullptr;
+  data.intervals = nullptr;
+  data.intervalCount = 0;
+  for (const uint32_t cp : queries) {
+    ASSERT_TRUE(checkIntervalLookup(data, cp));
+  }
+  PASS();
+}
+
+void testIntervalCallbacksKeepDistinctLookupSemantics() {
+  printf("testIntervalCallbacksKeepDistinctLookupSemantics...\n");
+  static const EpdUnicodeInterval intervals[] = {{'A', 'A', 0}};
+  static const EpdGlyph loadedGlyph = {9, 7, 160, 0, 7, 0, 0};
+  EpdFontData data = makeMetricsFontData(kGlyphs, intervals, 1);
+  data.coverageHandler = [](void*, uint32_t cp) { return cp == 0x10000; };
+  data.glyphMissHandler = [](void*, uint32_t cp) -> const EpdGlyph* { return cp == 0x20000 ? &loadedGlyph : nullptr; };
+  EpdFont font(&data);
+  ASSERT_TRUE(font.findGlyph('A') == &kGlyphs[0]);
+  ASSERT_TRUE(font.hasCodepoint('A'));  // Static coverage wins over the coverage callback's miss.
+  ASSERT_TRUE(font.findGlyph(0x10000) == nullptr);
+  ASSERT_TRUE(font.hasCodepoint(0x10000));
+  ASSERT_TRUE(font.getGlyph(0x10000) == nullptr);  // Coverage alone does not load a glyph.
+  ASSERT_TRUE(font.findGlyph(0x20000) == nullptr);
+  ASSERT_TRUE(!font.hasCodepoint(0x20000));  // Loading and coverage are distinct contracts.
+  ASSERT_TRUE(font.getGlyph(0x20000) == &loadedGlyph);
+
+#if CROSSINK_SCALABLE_FONTS
+  static const EpdGlyph dynamicGlyph = {11, 8, 192, 0, 8, 0, 0};
+  data.dynamicGlyphHandler = [](void*, uint32_t cp) -> const EpdGlyph* {
+    return cp == 0x30000 ? &dynamicGlyph : nullptr;
+  };
+  ASSERT_TRUE(font.findGlyph('A') == nullptr);  // A dynamic miss must not fall through to the table.
+  ASSERT_TRUE(font.hasCodepoint('A'));          // Coverage still checks the static table first.
+  ASSERT_TRUE(font.findGlyph(0x30000) == &dynamicGlyph);
+  ASSERT_TRUE(font.getGlyph(0x30000) == &dynamicGlyph);
+  ASSERT_TRUE(!font.hasCodepoint(0x30000));
+  ASSERT_TRUE(font.getGlyph(0x20000) == &loadedGlyph);
+#endif
+
+  data.glyph = nullptr;
+  data.intervals = nullptr;
+  data.intervalCount = 0;
+  ASSERT_TRUE(font.findGlyph(0x10000) == nullptr);
+  ASSERT_TRUE(font.hasCodepoint(0x10000));
+  ASSERT_TRUE(font.getGlyph(0x20000) == &loadedGlyph);
+  PASS();
+}
+
 // Known-value regression tests.  Expected widths are computed by hand using
 // differential rounding.  If someone reverts to absolute snapping, specific
 // test cases will fail.
@@ -822,6 +914,8 @@ int main() {
   testSparseKernLookupHandlesMissingEntries();
   testSparseKernLookupHandlesEmptyRow();
   testGlyphLookup();
+  testIntervalLookupEndpointsGapsAndWideCodepoints();
+  testIntervalCallbacksKeepDistinctLookupSemantics();
   testKnownWidths();
   testPairConsistencyViaFont();
   testNullGlyphAdvancePreserved();

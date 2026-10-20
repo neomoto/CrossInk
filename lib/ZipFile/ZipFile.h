@@ -60,6 +60,23 @@ class ZipFile {
     uint32_t localHeaderOffset;  // Offset of local file header
   };
 
+  // One resolved entry, tied to its ZipFile instance. It owns neither a file
+  // handle nor buffers; sizing closes the archive before parser allocation.
+  class StreamEntry {
+    friend class ZipFile;
+
+   public:
+    size_t inflatedSize() const { return stat.uncompressedSize; }
+
+   private:
+    const ZipFile* owner = nullptr;
+    FileStatSlim stat = {};
+    size_t archiveSize = 0;
+    uint32_t centralEntryOffset = 0;
+    uint32_t crc32 = 0;
+    uint32_t archiveModified = 0;
+  };
+
   struct ZipDetails {
     uint32_t centralDirOffset;
     uint16_t totalEntries;
@@ -123,7 +140,9 @@ class ZipFile {
   bool seekCentralDirectory();
   CentralDirectoryReadStatus readCentralDirectoryHeader(CentralDirectoryHeader& header);
   bool readCentralDirectoryName(const CentralDirectoryHeader& header, char (&name)[256]);
-  bool findFileStatSlim(const char* filename, FileStatSlim* fileStat);
+  bool findFileStatSlim(const char* filename, FileStatSlim* fileStat, StreamEntry* streamEntry = nullptr);
+  bool wrapCentralDirectorySearch(uint32_t startPos, bool& wrapped);
+  void captureStreamEntry(StreamEntry* entry, const CentralDirectoryHeader& header, uint32_t entryStart);
   static int matchUncompressedSizes(const CentralDirectoryHeader& header, const char* name, const SizeTarget* targets,
                                     size_t targetCount, uint32_t* sizes, size_t sizeCount);
   static int matchEntryIdentities(const CentralDirectoryHeader& header, const char* name, const EntryTarget* targets,
@@ -132,6 +151,14 @@ class ZipFile {
   bool loadFileStatSlim(const char* filename, FileStatSlim* fileStat);
   long getDataOffset(const FileStatSlim& fileStat);
   bool loadZipDetails();
+  bool matchesStreamArchive(const StreamEntry& entry);
+  bool validateStreamEntry(const char* filename, const StreamEntry& entry);
+  bool streamFileStat(const char* filename, const FileStatSlim& stat, Print& out, size_t chunkSize, bool allowEarlyStop,
+                      uint32_t started);
+  bool streamStoredFile(const char* filename, const FileStatSlim& stat, Print& out, size_t chunkSize,
+                        bool allowEarlyStop, uint32_t lookupUs);
+  bool streamDeflatedFile(const char* filename, const FileStatSlim& stat, Print& out, size_t chunkSize,
+                          bool allowEarlyStop, uint32_t lookupUs);
 
  public:
   explicit ZipFile(const std::string& filePath) : filePath(filePath) {}
@@ -143,6 +170,10 @@ class ZipFile {
   bool close();
   bool loadAllFileStatSlims();
   bool getInflatedFileSize(const char* filename, size_t* size);
+  // Resolve once for size-then-stream consumers without pre-opening for
+  // inflation. Streaming reopens and checks the exact central entry, including
+  // its full name and identity, rather than trusting a caller-provided offset.
+  bool resolveStreamEntry(const char* filename, StreamEntry& entry);
   // Batch lookup: scan ZIP central dir once and fill sizes for matching targets.
   // targets must be sorted by (hash, len). sizes[target.index] receives uncompressedSize.
   // Returns number of targets matched.
@@ -156,6 +187,8 @@ class ZipFile {
   uint8_t* readFileToMemory(const char* filename, size_t* size = nullptr, bool trailingNullByte = false);
   bool readStoredFileToStream(const char* filename, Print& out);
   bool readFileToStream(const char* filename, Print& out, size_t chunkSize, bool allowEarlyStop = false);
+  bool readFileToStream(const char* filename, const StreamEntry& entry, Print& out, size_t chunkSize,
+                        bool allowEarlyStop = false);
   std::unique_ptr<ZipFileStreamReader> openFileStream(const char* filename, size_t chunkSize);
 
   template <typename F>

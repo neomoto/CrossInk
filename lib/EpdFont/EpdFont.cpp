@@ -144,15 +144,23 @@ static uint8_t lookupKernClassForSide(const EpdFontData* data, const uint32_t cp
 }
 
 static int8_t lookupSparseKerning(const EpdFontData* data, const uint8_t lc, const uint8_t rc) {
-  // Built-in fonts use a sparse matrix. Rows are short and ordered by column,
-  // so a forward scan avoids the flash and branch cost of a binary search.
+  // Built-in rows reach 91 columns (Inter UI: 64). Narrow long rows, then
+  // retain a short forward scan so small rows avoid a full binary search.
   if (!data->kernSparseCols || !data->kernSparseValues || lc > data->kernLeftClassCount ||
       rc > data->kernRightClassCount) {
     return 0;
   }
-  const uint16_t begin = data->kernRowOffsets[lc - 1];
-  const uint16_t end = data->kernRowOffsets[lc];
+  uint16_t begin = data->kernRowOffsets[lc - 1];
+  uint16_t end = data->kernRowOffsets[lc];
   const auto target = static_cast<uint8_t>(rc - 1);
+  while (end - begin > 8) {
+    const uint16_t mid = begin + (end - begin) / 2;
+    if (data->kernSparseCols[mid] < target) {
+      begin = mid + 1;
+    } else {
+      end = mid + 1;  // Keep mid as a possible first match for the final scan.
+    }
+  }
   for (uint16_t i = begin; i < end; i++) {
     if (data->kernSparseCols[i] == target) return data->kernSparseValues[i];
     if (data->kernSparseCols[i] > target) break;
@@ -241,29 +249,31 @@ uint32_t EpdFont::applyLigatures(uint32_t cp, const char*& text) const {
   return cp;
 }
 
+// Find the last interval starting at or before cp. Use the table's 32-bit
+// indices directly instead of a generic iterator upper_bound; no glyph or
+// coverage callbacks belong in this shared static-table lookup.
+static const EpdUnicodeInterval* findGlyphInterval(const EpdFontData* data, const uint32_t cp) {
+  uint32_t begin = 0;
+  uint32_t end = data->intervalCount;
+  while (begin < end) {
+    const uint32_t mid = begin + (end - begin) / 2;
+    if (cp < data->intervals[mid].first) {
+      end = mid;
+    } else {
+      begin = mid + 1;
+    }
+  }
+  if (begin == 0) return nullptr;
+  const auto* interval = &data->intervals[begin - 1];
+  return cp <= interval->last ? interval : nullptr;
+}
+
 const EpdGlyph* EpdFont::findGlyph(const uint32_t cp) const {
 #if CROSSINK_SCALABLE_FONTS
   if (data->dynamicGlyphHandler) return data->dynamicGlyphHandler(data->glyphMissCtx, cp);
 #endif
-  const int count = data->intervalCount;
-  if (count == 0 && !data->glyphMissHandler) return nullptr;
-
-  if (count > 0) {
-    const EpdUnicodeInterval* intervals = data->intervals;
-    const auto* end = intervals + count;
-
-    // upper_bound: range lookup. Finds the first interval with first > cp, so the
-    // interval just before it is the last one with first <= cp. That's the only
-    // candidate that could contain cp. Then we verify cp <= candidate.last.
-    const auto it = std::upper_bound(
-        intervals, end, cp, [](uint32_t value, const EpdUnicodeInterval& interval) { return value < interval.first; });
-
-    if (it != intervals) {
-      const auto& interval = *(it - 1);
-      if (cp <= interval.last) {
-        return &data->glyph[interval.offset + (cp - interval.first)];
-      }
-    }
+  if (const auto* interval = findGlyphInterval(data, cp)) {
+    return &data->glyph[interval->offset + (cp - interval->first)];
   }
 
   return nullptr;
@@ -287,14 +297,7 @@ const EpdGlyph* EpdFont::getGlyph(const uint32_t cp) const {
 }
 
 bool EpdFont::hasCodepoint(const uint32_t cp) const {
-  const int count = data->intervalCount;
-  if (count > 0) {
-    const EpdUnicodeInterval* intervals = data->intervals;
-    const auto* end = intervals + count;
-    const auto it = std::upper_bound(
-        intervals, end, cp, [](uint32_t value, const EpdUnicodeInterval& interval) { return value < interval.first; });
-    if (it != intervals && cp <= (it - 1)->last) return true;
-  }
+  if (findGlyphInterval(data, cp)) return true;
 
   // Interval table miss. SD card fonts only keep the current page's glyphs in
   // their interval table — ask their full RAM-resident coverage index instead.

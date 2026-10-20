@@ -417,6 +417,95 @@ bool TextBlock::serializeRuby(HalFile& file) const {
   return true;
 }
 
+namespace {
+
+bool validateTextBlockHeader(const uint16_t wordCount, const uint8_t hasFocus, const uint8_t hasGuideDots,
+                             const uint8_t hasWordFlags, const uint8_t hasWordSpaces, const uint16_t textBytes) {
+  if (wordCount > MAX_WORDS_PER_TEXT_BLOCK) {
+    LOG_ERR("TXB", "Deserialization failed: word count %u exceeds maximum", wordCount);
+    return false;
+  }
+  if (hasFocus > 1 || hasGuideDots > 1 || hasWordFlags > 1 || hasWordSpaces > 1) {
+    LOG_ERR("TXB", "Deserialization failed: invalid metadata flags");
+    return false;
+  }
+  if ((wordCount == 0 && textBytes != 0) || (wordCount > 0 && textBytes < wordCount)) {
+    LOG_ERR("TXB", "Deserialization failed: bad text size %u for %u words", textBytes, wordCount);
+    return false;
+  }
+  return true;
+}
+
+std::unique_ptr<uint8_t[]> deserializeTextArena(HalFile& file, const size_t size) {
+  const int remaining = file.available();
+  if (remaining < 0 || static_cast<size_t>(remaining) < size) {
+    LOG_ERR("TXB", "Deserialization failed: truncated arena (%u bytes needed, %d available)",
+            static_cast<uint32_t>(size), remaining);
+    return nullptr;
+  }
+  auto arena = makeUniqueNoThrow<uint8_t[]>(size);
+  if (!arena) {
+    LOG_ERR("TXB", "OOM: arena %u bytes", static_cast<uint32_t>(size));
+    return nullptr;
+  }
+  if (file.read(arena.get(), size) != static_cast<int>(size)) {
+    LOG_ERR("TXB", "Deserialization failed: arena read (%u bytes)", static_cast<uint32_t>(size));
+    return nullptr;
+  }
+  return arena;
+}
+
+bool validateTextArena(const uint16_t* textOffsets, const char* text, const uint16_t wordCount,
+                       const uint16_t textBytes) {
+  if (textOffsets[0] != 0 || text[textBytes - 1] != '\0') {
+    LOG_ERR("TXB", "Deserialization failed: corrupt text layout");
+    return false;
+  }
+  for (uint16_t i = 1; i < wordCount; i++) {
+    if (textOffsets[i] <= textOffsets[i - 1] || textOffsets[i] >= textBytes || text[textOffsets[i] - 1] != '\0') {
+      LOG_ERR("TXB", "Deserialization failed: corrupt word offset %u", i);
+      return false;
+    }
+  }
+  return true;
+}
+
+bool deserializeRuby(HalFile& file, const uint16_t wordCount, std::vector<std::string>& rubyTexts) {
+  uint16_t rubyCount = 0;
+  if (!serialization::tryReadPod(file, rubyCount) || rubyCount > wordCount) {
+    LOG_ERR("TXB", "Deserialization failed: invalid ruby count %u", rubyCount);
+    return false;
+  }
+  if (rubyCount > 0) rubyTexts.resize(wordCount);
+  for (uint16_t i = 0; i < rubyCount; ++i) {
+    uint16_t wordIndex = 0;
+    std::string ruby;
+    if (!serialization::tryReadPod(file, wordIndex) || wordIndex >= wordCount ||
+        !serialization::tryReadString(file, ruby)) {
+      LOG_ERR("TXB", "Deserialization failed: invalid ruby annotation");
+      return false;
+    }
+    rubyTexts[wordIndex] = std::move(ruby);
+  }
+  return true;
+}
+
+bool deserializeBlockStyle(HalFile& file, BlockStyle& style) {
+  if (!serialization::tryReadPodGroup(file, style.alignment, style.textAlignDefined, style.marginTop,
+                                      style.marginBottom, style.marginLeft, style.marginRight, style.paddingTop,
+                                      style.paddingBottom, style.paddingLeft, style.paddingRight, style.textIndent,
+                                      style.textIndentDefined, style.isRtl, style.directionDefined, style.fontSize,
+                                      style.lineHeight) ||
+      (style.fontSize != 0 &&
+       (style.fontSize < ScalableContentMinPointSize || style.fontSize > ScalableContentMaxPointSize))) {
+    LOG_ERR("TXB", "Deserialization failed: truncated block style metadata");
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
 std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   uint16_t wc = 0;
   uint8_t hasFocus = 0;
@@ -424,23 +513,11 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   uint8_t hasWordFlags = 0;
   uint8_t hasWordSpaces = 0;
   uint16_t textBytes = 0;
-  if (!serialization::tryReadPod(file, wc) || !serialization::tryReadPod(file, hasFocus) ||
-      !serialization::tryReadPod(file, hasGuideDots) || !serialization::tryReadPod(file, hasWordFlags) ||
-      !serialization::tryReadPod(file, hasWordSpaces) || !serialization::tryReadPod(file, textBytes)) {
+  if (!serialization::tryReadPodGroup(file, wc, hasFocus, hasGuideDots, hasWordFlags, hasWordSpaces, textBytes)) {
     LOG_ERR("TXB", "Deserialization failed: could not read block header");
     return nullptr;
   }
-
-  if (wc > MAX_WORDS_PER_TEXT_BLOCK) {
-    LOG_ERR("TXB", "Deserialization failed: word count %u exceeds maximum", wc);
-    return nullptr;
-  }
-  if (hasFocus > 1 || hasGuideDots > 1 || hasWordFlags > 1 || hasWordSpaces > 1) {
-    LOG_ERR("TXB", "Deserialization failed: invalid metadata flags");
-    return nullptr;
-  }
-  if ((wc == 0 && textBytes != 0) || (wc > 0 && textBytes < wc)) {
-    LOG_ERR("TXB", "Deserialization failed: bad text size %u for %u words", textBytes, wc);
+  if (!validateTextBlockHeader(wc, hasFocus, hasGuideDots, hasWordFlags, hasWordSpaces, textBytes)) {
     return nullptr;
   }
 
@@ -459,75 +536,18 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   if (wc > 0) {
     const size_t size = arenaSize(wc, block->focusPresent, block->guideDotsPresent, block->wordFlagsPresent,
                                   block->wordSpacesPresent, textBytes);
-    const int remaining = file.available();
-    if (remaining < 0 || static_cast<size_t>(remaining) < size) {
-      LOG_ERR("TXB", "Deserialization failed: truncated arena (%u bytes needed, %d available)",
-              static_cast<uint32_t>(size), remaining);
-      return nullptr;
-    }
-    block->arena = makeUniqueNoThrow<uint8_t[]>(size);
+    block->arena = deserializeTextArena(file, size);
     if (!block->arena) {
-      LOG_ERR("TXB", "OOM: arena %u bytes", static_cast<uint32_t>(size));
-      return nullptr;
-    }
-    if (file.read(block->arena.get(), size) != static_cast<int>(size)) {
-      LOG_ERR("TXB", "Deserialization failed: arena read (%u bytes)", static_cast<uint32_t>(size));
       return nullptr;
     }
     block->bindArenaPointers();
-
-    const uint16_t* textOff = block->textOffArr;
-    const char* text = block->textArr;
-    if (textOff[0] != 0 || text[textBytes - 1] != '\0') {
-      LOG_ERR("TXB", "Deserialization failed: corrupt text layout");
+    if (!validateTextArena(block->textOffArr, block->textArr, wc, textBytes)) {
       return nullptr;
     }
-    for (uint16_t i = 1; i < wc; i++) {
-      if (textOff[i] <= textOff[i - 1] || textOff[i] >= textBytes || text[textOff[i] - 1] != '\0') {
-        LOG_ERR("TXB", "Deserialization failed: corrupt word offset %u", i);
-        return nullptr;
-      }
-    }
   }
 
-  uint16_t rubyCount = 0;
-  if (!serialization::tryReadPod(file, rubyCount) || rubyCount > wc) {
-    LOG_ERR("TXB", "Deserialization failed: invalid ruby count %u", rubyCount);
+  if (!deserializeRuby(file, wc, block->rubyTexts) || !deserializeBlockStyle(file, block->blockStyle)) {
     return nullptr;
   }
-  if (rubyCount > 0) block->rubyTexts.resize(wc);
-  for (uint16_t i = 0; i < rubyCount; ++i) {
-    uint16_t wordIndex = 0;
-    std::string ruby;
-    if (!serialization::tryReadPod(file, wordIndex) || wordIndex >= wc || !serialization::tryReadString(file, ruby)) {
-      LOG_ERR("TXB", "Deserialization failed: invalid ruby annotation");
-      return nullptr;
-    }
-    block->rubyTexts[wordIndex] = std::move(ruby);
-  }
-
-  BlockStyle& blockStyle = block->blockStyle;
-  if (!serialization::tryReadPod(file, blockStyle.alignment) ||
-      !serialization::tryReadPod(file, blockStyle.textAlignDefined) ||
-      !serialization::tryReadPod(file, blockStyle.marginTop) ||
-      !serialization::tryReadPod(file, blockStyle.marginBottom) ||
-      !serialization::tryReadPod(file, blockStyle.marginLeft) ||
-      !serialization::tryReadPod(file, blockStyle.marginRight) ||
-      !serialization::tryReadPod(file, blockStyle.paddingTop) ||
-      !serialization::tryReadPod(file, blockStyle.paddingBottom) ||
-      !serialization::tryReadPod(file, blockStyle.paddingLeft) ||
-      !serialization::tryReadPod(file, blockStyle.paddingRight) ||
-      !serialization::tryReadPod(file, blockStyle.textIndent) ||
-      !serialization::tryReadPod(file, blockStyle.textIndentDefined) ||
-      !serialization::tryReadPod(file, blockStyle.isRtl) ||
-      !serialization::tryReadPod(file, blockStyle.directionDefined) ||
-      !serialization::tryReadPod(file, blockStyle.fontSize) ||
-      !serialization::tryReadPod(file, blockStyle.lineHeight) ||
-      (blockStyle.fontSize != 0 &&
-       (blockStyle.fontSize < ScalableContentMinPointSize || blockStyle.fontSize > ScalableContentMaxPointSize))) {
-    LOG_ERR("TXB", "Deserialization failed: truncated block style metadata");
-    return nullptr;
-  }
-
   return block;
 }

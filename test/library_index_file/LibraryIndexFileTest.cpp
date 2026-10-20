@@ -452,6 +452,85 @@ TEST(LibraryIndexFile, SourceMetadataPreservesMaximumLengthAndNonTextBytes) {
   EXPECT_FALSE(index.ioFailed());
 }
 
+TEST(LibraryIndexFile, AdjacentMetadataBlobsRemainIndependentAcrossSkippedFieldsAndTitleFallback) {
+  const std::string displayAuthor(255, 'd');
+  const std::string sourceAuthor(255, 's');
+  const std::string_view binaryTitle("B\0Title", 7);
+  const auto first =
+      makeMetadataIndex(library::CLIX_FORMAT_VERSION, "first.epub", {displayAuthor, "", sourceAuthor, "", "First"}, 0);
+  const auto second =
+      makeMetadataIndex(library::CLIX_FORMAT_VERSION, "second.epub", {"", binaryTitle, "", "Second", ""}, 0x89ABCDEFu);
+  auto header = first.header;
+  header.bookCount = 2;
+  library::layoutSections(header, 0, first.header.nameLen + second.header.nameLen);
+  auto secondRecord = second.record;
+  secondRecord.nameOff = first.header.nameLen;
+  std::vector<uint8_t> bytes(header.selfSize, 0);
+  std::memcpy(bytes.data(), &header, sizeof(header));
+  std::memcpy(bytes.data() + library::recordOffset(header, 0), &first.record, sizeof(first.record));
+  std::memcpy(bytes.data() + library::recordOffset(header, 1), &secondRecord, sizeof(secondRecord));
+  std::memcpy(bytes.data() + header.nameStart, first.bytes.data() + first.header.nameStart, first.header.nameLen);
+  std::memcpy(bytes.data() + header.nameStart + secondRecord.nameOff, second.bytes.data() + second.header.nameStart,
+              second.header.nameLen);
+  Storage.setFile("/library.clx", std::move(bytes));
+  library::LibraryIndexFile index;
+  ASSERT_TRUE(index.open("/library.clx"));
+
+  std::string title, author, series, genre;
+  uint32_t position = 1;
+  ASSERT_TRUE(index.readSourceMetadata(first.record, title, author, series, genre, position));
+  EXPECT_TRUE(title.empty());
+  EXPECT_EQ(author, sourceAuthor);
+  EXPECT_TRUE(series.empty());
+  EXPECT_EQ(genre, "First");
+  EXPECT_EQ(position, 0u);
+  ASSERT_TRUE(index.readDisplayText(first.record, title, author));
+  EXPECT_EQ(title, "first");
+  EXPECT_EQ(author, displayAuthor);
+  ASSERT_TRUE(index.readSeriesPosition(secondRecord, position));
+  EXPECT_EQ(position, 0x89ABCDEFu);
+  ASSERT_TRUE(index.readTitle(secondRecord, title));
+  EXPECT_EQ(title, binaryTitle);
+  ASSERT_TRUE(index.readGenre(first.record, genre));
+  EXPECT_EQ(genre, "First");
+  ASSERT_TRUE(index.readSourceMetadata(secondRecord, title, author, series, genre, position));
+  EXPECT_EQ(title, binaryTitle);
+  EXPECT_TRUE(author.empty());
+  EXPECT_EQ(series, "Second");
+  EXPECT_TRUE(genre.empty());
+  EXPECT_EQ(position, 0x89ABCDEFu);
+  EXPECT_FALSE(index.ioFailed());
+}
+
+TEST(LibraryIndexFile, TruncatedSourceFieldKeepsEarlierDisplayFieldsReadableAcrossLegacyVersions) {
+  const std::string displayAuthor(255, 'd');
+  constexpr std::string_view NAME = "book.epub";
+  constexpr std::string_view SOURCE = "Source";
+  for (uint8_t version = 2; version <= library::CLIX_FORMAT_VERSION; ++version) {
+    SCOPED_TRACE(static_cast<unsigned>(version));
+    const auto fixture = version >= 3 ? makeMetadataIndex(version, NAME, {displayAuthor, "", SOURCE, "", ""})
+                                      : makeMetadataIndex(version, NAME, {displayAuthor, "", SOURCE});
+    Storage.setFile("/library.clx", fixture.bytes);
+    library::LibraryIndexFile index;
+    ASSERT_TRUE(index.openForReconciliation("/library.clx"));
+    auto truncated = fixture.bytes;
+    const size_t sourcePayload =
+        fixture.header.nameStart + sizeof(uint64_t) + NAME.size() + 1 + displayAuthor.size() + 1 + 1;
+    truncated.resize(sourcePayload + SOURCE.size() - 1);
+    Storage.setFile("/library.clx", std::move(truncated));
+    std::string title, author;
+    EXPECT_FALSE(index.readSourceAuthor(fixture.record, author));
+    EXPECT_TRUE(index.ioFailed());
+    ASSERT_TRUE(index.readDisplayText(fixture.record, title, author));
+    EXPECT_EQ(title, "book");
+    EXPECT_EQ(author, displayAuthor);
+    Storage.setFile("/library.clx", fixture.bytes);
+    ASSERT_TRUE(index.readSourceAuthor(fixture.record, author));
+    EXPECT_EQ(author, SOURCE);
+    EXPECT_TRUE(index.ioFailed());
+  }
+}
+
 TEST(LibraryIndexFile, SourceMetadataRejectsEveryTruncatedBlobBoundaryWithoutIoFailure) {
   const auto complete = makeMetadataIndex(library::CLIX_FORMAT_VERSION, "book.epub",
                                           {"Display", "Title", "Source", "Series", "Genre"}, 7);

@@ -124,6 +124,55 @@ class KerningLookupTest : public testing::TestWithParam<std::tuple<bool, bool>> 
     data_.kernAsciiClassIds = kAsciiClasses.data();
   }
 
+  void appendSparseRow(const size_t row, const size_t rightCount) {
+    longOffsets_.push_back(static_cast<uint16_t>(longColumns_.size()));
+    for (size_t col = 0; col < rightCount; ++col) {
+      const int8_t value = longDense_[row * rightCount + col];
+      if (value == 0) continue;
+      longColumns_.push_back(static_cast<uint8_t>(col));
+      longValues_.push_back(value);
+    }
+  }
+
+  void configureLongRows(const std::vector<uint16_t>& lengths) {
+    constexpr size_t rightCount = 255;
+    std::vector<EpdKernClassEntry> left{{0xFF, 0}};
+    std::vector<EpdKernClassEntry> right{{0x1FF, 0}};
+    for (size_t row = 0; row < lengths.size(); ++row) {
+      left.push_back({static_cast<uint16_t>(0x100 + row), static_cast<uint8_t>(row + 1)});
+    }
+    for (size_t col = 0; col < rightCount; ++col) {
+      right.push_back({static_cast<uint16_t>(0x200 + col), static_cast<uint8_t>(col + 1)});
+    }
+    configure(std::move(left), std::move(right));
+    data_.kernLeftClassCount = static_cast<uint8_t>(lengths.size());
+    data_.kernRightClassCount = rightCount;
+
+    // The oracle is a full dense matrix. Derive only the sparse storage from
+    // it; expected values never consult row offsets or the search algorithm.
+    longDense_.assign(lengths.size() * rightCount, 0);
+    longOffsets_.clear();
+    longColumns_.clear();
+    longValues_.clear();
+    for (size_t row = 0; row < lengths.size(); ++row) {
+      for (size_t col = 0; col < rightCount; ++col) {
+        const size_t bucket = row % 2 == 0 ? col : rightCount - 1 - col;
+        if ((bucket + 1) * lengths[row] / rightCount == bucket * lengths[row] / rightCount) continue;
+        const auto magnitude = static_cast<int8_t>(1 + (row * 19 + col * 7) % 127);
+        longDense_[row * rightCount + col] = (row + col) % 2 == 0 ? magnitude : -magnitude;
+      }
+      appendSparseRow(row, rightCount);
+    }
+    longOffsets_.push_back(static_cast<uint16_t>(longColumns_.size()));
+    if (std::get<1>(GetParam())) {
+      data_.kernRowOffsets = longOffsets_.data();
+      data_.kernSparseCols = longColumns_.data();
+      data_.kernSparseValues = longValues_.data();
+    } else {
+      data_.kernMatrix = longDense_.data();
+    }
+  }
+
   EpdFont font() const { return EpdFont(&data_); }
 
   void expectPair(const uint32_t left, const uint32_t right) const {
@@ -135,6 +184,10 @@ class KerningLookupTest : public testing::TestWithParam<std::tuple<bool, bool>> 
   ClassMap left_;
   ClassMap right_;
   EpdFontData data_{};
+  std::vector<int8_t> longDense_;
+  std::vector<uint16_t> longOffsets_;
+  std::vector<uint8_t> longColumns_;
+  std::vector<int8_t> longValues_;
 };
 
 TEST_P(KerningLookupTest, EmptyMapsReturnZero) {
@@ -374,6 +427,25 @@ TEST_P(KerningLookupTest, CjkGuardRemainsAheadOfAsciiAndFallbackClasses) {
   EXPECT_EQ(font().getKerning(0x4E00, 'A'), 0);
   EXPECT_EQ(font().getKerning('A', 0x4E00), 0);
   EXPECT_EQ(font().getKerning(0x4E00, 0x4E00), 0);
+}
+
+TEST_P(KerningLookupTest, LongRowsMatchDenseOracleAtEveryColumnAndGap) {
+  // Include both sides of the short-scan boundary, actual built-in maxima
+  // (Inter 64, Bitter 91), and the full uint8 class range. Empty rows at
+  // several offsets catch accidental reads into a neighboring row.
+  const std::vector<uint16_t> lengths = {0,  1,  7,  8,  9,  15,  16,  17,  0,   31,  32, 33,
+                                         63, 64, 65, 90, 91, 127, 128, 129, 254, 255, 0};
+  configureLongRows(lengths);
+  for (size_t row = 0; row < lengths.size(); ++row) {
+    SCOPED_TRACE(row);
+    for (uint32_t col = 0; col < 255; ++col) {
+      EXPECT_EQ(font().getKerning(0x100 + row, 0x200 + col), longDense_[row * 255 + col]) << "column=" << col;
+    }
+    EXPECT_EQ(font().getKerning(0x100 + row, 0x1FF), 0);  // Explicit zero right class.
+    EXPECT_EQ(font().getKerning(0x100 + row, 0x2FF), 0);  // Beyond the last mapped key.
+  }
+  EXPECT_EQ(font().getKerning(0xFF, 0x200), 0);  // Explicit zero left class.
+  EXPECT_EQ(font().getKerning(0xFF, 0x2FE), 0);
 }
 
 #if CROSSINK_SCALABLE_FONTS

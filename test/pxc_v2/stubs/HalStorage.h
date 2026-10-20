@@ -29,6 +29,7 @@ class HalFile : public Print {
   void flush() {}
   size_t size() const { return data_ ? data_->bytes.size() : 0; }
   size_t fileSize() const { return size(); }
+  uint32_t modificationTime() const { return 0; }
   int available() const { return data_ && cursor_ < data_->bytes.size(); }
   size_t position() const { return cursor_; }
 

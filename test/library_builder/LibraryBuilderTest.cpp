@@ -765,6 +765,64 @@ TEST_F(LibraryBuilderTest, SortsPastTheFirstTwelveTitleAndSurnameBytes) {
   EXPECT_EQ(pathAt(index, SortOrder::AuthorAsc, 1), "/a.epub");
 }
 
+TEST_F(LibraryBuilderTest, StageSortsPreserveExactSegmentEndsAndMaximumLengthTextAcrossReconciliation) {
+  std::vector<std::string> titles;
+  for (const size_t prefixBytes : {11u, 12u, 23u, 24u, 83u, 84u, 95u, 96u}) {
+    const std::string prefix(prefixBytes, 'q');
+    titles.push_back(prefix + "z");
+    titles.push_back(prefix + "a");
+    titles.push_back(prefix);
+  }
+  std::vector<uint16_t> expected(titles.size());
+  std::iota(expected.begin(), expected.end(), 0);
+  std::stable_sort(expected.begin(), expected.end(), [&](const uint16_t left, const uint16_t right) {
+    return titles[left].substr(0, CLIX_FOLD_BYTES) < titles[right].substr(0, CLIX_FOLD_BYTES);
+  });
+  const auto path = [](const uint16_t book) { return "/" + numbered("book", book) + ".epub"; };
+  const auto populate = [&] {
+    fake::reset();
+    bookMetadata.clear();
+    for (uint16_t book = 0; book < titles.size(); ++book) {
+      const std::string bookPath = path(book);
+      fake::add(bookPath);
+      auto& metadata = bookMetadata[bookPath];
+      metadata.title = titles[book];
+      metadata.author.assign(128, 'v');
+      metadata.series.assign(128, 's');
+      metadata.seriesIndex = std::to_string(book);
+      metadata.genre.assign(128, 'g');
+    }
+  };
+  std::vector<uint8_t> inRam;
+  for (const bool spill : {false, true}) {
+    SCOPED_TRACE(spill);
+    populate();
+    fake::psram = !spill;
+    // Twenty-four entries make five spilled runs, leaving one buffer slot per
+    // merge head. A four-entry buffer cannot hold its six merge heads.
+    setSortRunCapacityForTesting(spill ? 5 : 0);
+    ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+    LibraryIndexFile index;
+    ASSERT_TRUE(index.open(INDEX));
+    ASSERT_EQ(index.bookCount(), titles.size());
+    for (uint16_t row = 0; row < titles.size(); ++row) {
+      EXPECT_EQ(pathAt(index, SortOrder::TitleAsc, row), path(expected[row]));
+      EXPECT_EQ(pathAt(index, SortOrder::AuthorAsc, row), path(expected[row]));
+      EXPECT_EQ(pathAt(index, SortOrder::AuthorFirstAsc, row), path(expected[row]));
+      EXPECT_EQ(pathAt(index, SortOrder::GenreAsc, row), path(expected[row]));
+      EXPECT_EQ(pathAt(index, SortOrder::SeriesAsc, row), path(row));
+    }
+    index.close();
+    if (spill)
+      EXPECT_EQ(fake::files[INDEX]->bytes, inRam);
+    else
+      inRam = fake::files[INDEX]->bytes;
+    ASSERT_TRUE(buildLibraryIndex("/", stats, true));
+    EXPECT_EQ(stats.metadataReused, titles.size());
+    EXPECT_EQ(fake::files[INDEX]->bytes, inRam);
+  }
+}
+
 TEST_F(LibraryBuilderTest, FirstNameAndLastNameAuthorOrdersDiffer) {
   fake::add("/c.epub");
   bookMetadata["/a.epub"].author = "Zoe Adams";

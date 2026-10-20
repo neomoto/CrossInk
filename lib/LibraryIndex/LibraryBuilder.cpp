@@ -919,9 +919,9 @@ uint32_t blobBytesFor(const StagedEntry& entry, const uint8_t canonicalAuthorLen
 
 uint64_t stageOffset(const uint16_t index) { return static_cast<uint64_t>(index) * STAGE_STRIDE; }
 
-// Random access to staged books. Every read seeks first, so the sort key
-// loaders and the passes that drive them share the single handle real
-// hardware allows per file.
+// Random access to staged books. Each operation seeks first, then consumes its
+// adjacent fields sequentially. The sort key loaders and emit passes still
+// share the single handle real hardware allows per file.
 class StageReader {
  public:
   bool open() {
@@ -932,16 +932,7 @@ class StageReader {
   // A short read leaves the previous book's bytes in the buffer, and a
   // duplicate row is internally consistent enough to pass validation, so any
   // failure latches and fails the emit.
-  bool read(const uint64_t offset, void* data, const size_t len) {
-    if (buildCancelled()) failed = true;
-    if (failed) return false;
-    if (!file.seekSet(offset) || file.read(data, len) != static_cast<int>(len)) {
-      LOG_ERR("LIBIDX", "record stage read failed at %u", static_cast<unsigned>(offset));
-      failed = true;
-      return false;
-    }
-    return true;
-  }
+  bool read(const uint64_t offset, void* data, const size_t len) { return readBytes(offset, data, len, true); }
   bool entry(const uint16_t index, StagedEntry& out) { return read(stageOffset(index), &out, STAGE_STRIDE); }
   bool record(const uint16_t index, ClixRecord& out) {
     return read(stageOffset(index) + offsetof(StagedEntry, record), &out, sizeof(out));
@@ -957,10 +948,25 @@ class StageReader {
       return false;
     }
     out.resize(len);
-    return len == 0 || read(stageOffset(index) + textOffset, &out[0], len);
+    return len == 0 ||
+           readBytes(stageOffset(index) + textOffset, &out[0], len, textOffset != lengthOffset + sizeof(len));
   }
   bool author(const uint16_t index, std::string& out) {
     return text(index, offsetof(StagedEntry, authorLen), offsetof(StagedEntry, author), STAGE_AUTHOR_BYTES, out);
+  }
+  bool titleSegment(const uint16_t index, const size_t offset, char* segment, size_t& valueBytes) {
+    if (offset > CLIX_FOLD_BYTES - SORT_SEGMENT_BYTES) {
+      failed = true;
+      return false;
+    }
+    constexpr size_t PREFIX_BYTES = offsetof(ClixRecord, fold) - offsetof(ClixRecord, foldLen);
+    uint8_t bytes[PREFIX_BYTES + CLIX_FOLD_BYTES];
+    const size_t readBytes = PREFIX_BYTES + offset + SORT_SEGMENT_BYTES;
+    if (!read(stageOffset(index) + offsetof(StagedEntry, record) + offsetof(ClixRecord, foldLen), bytes, readBytes))
+      return false;
+    valueBytes = bytes[0];
+    memcpy(segment, bytes + PREFIX_BYTES + offset, SORT_SEGMENT_BYTES);
+    return true;
   }
   bool isFailed() const { return failed; }
   ~StageReader() {
@@ -968,6 +974,17 @@ class StageReader {
   }
 
  private:
+  bool readBytes(const uint64_t offset, void* data, const size_t len, const bool seek) {
+    if (buildCancelled()) failed = true;
+    if (failed) return false;
+    if ((seek && !file.seekSet(offset)) || file.read(data, len) != static_cast<int>(len)) {
+      LOG_ERR("LIBIDX", "record stage read failed at %u", static_cast<unsigned>(offset));
+      failed = true;
+      return false;
+    }
+    return true;
+  }
+
   HalFile file;
   bool failed = false;
 };
@@ -985,11 +1002,7 @@ struct KeyLoader {
 
 bool loadTitleSegment(void* context, const uint16_t source, const size_t offset, char* segment, size_t& valueBytes) {
   auto& loader = *static_cast<KeyLoader*>(context);
-  const uint64_t record = stageOffset(source) + offsetof(StagedEntry, record);
-  uint8_t foldLen = 0;
-  if (!loader.stage->read(record + offsetof(ClixRecord, foldLen), &foldLen, sizeof(foldLen))) return false;
-  valueBytes = foldLen;
-  return loader.stage->read(record + offsetof(ClixRecord, fold) + offset, segment, SORT_SEGMENT_BYTES);
+  return loader.stage->titleSegment(source, offset, segment, valueBytes);
 }
 
 // The shelf is ordered by surname of the canonical spelling, so `source` is

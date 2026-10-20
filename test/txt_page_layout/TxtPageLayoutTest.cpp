@@ -121,6 +121,18 @@ void putLegacyProgress(const uint16_t page) {
   Storage.put("/cache/progress.bin", {static_cast<uint8_t>(page), static_cast<uint8_t>(page >> 8), 0, 0});
 }
 
+txtlayout::PageIndexSpec offsetArraySpec() { return {0xF1020304u, 0x01020304, -2, 0x12345678, -4, 0x11223344, 0xA5}; }
+
+std::vector<size_t> boundaryOffsets() {
+  std::vector<size_t> offsets;
+  for (size_t i = 0; i < 65; ++i) offsets.push_back(i * 0x01020408u);
+  offsets[30] = 0x7FFFFFFFu;
+  offsets[31] = offsets[32] = 0x80000000u;
+  offsets[33] = 0xFFFFFFFEu;
+  offsets[64] = 0xFFFFFFFFu;
+  return offsets;
+}
+
 class TxtPageIndexTest : public testing::Test {
  protected:
   void SetUp() override { Storage.reset(); }
@@ -539,6 +551,100 @@ TEST_F(TxtPageIndexTest, EveryExistingSpecAndSourceFieldStillRejectsAStaleSlot) 
     EXPECT_EQ(Storage.bytes(narrowPath), narrowBytes);
     EXPECT_EQ(Storage.bytes(widePath), wideBytes);
   }
+}
+
+TEST_F(TxtPageIndexTest, OffsetArrayPreservesExactV5BytesAcrossChunkBoundaries) {
+  const auto spec = offsetArraySpec();
+  const auto offsets = boundaryOffsets();
+  ASSERT_TRUE(txtlayout::savePageIndex("/cache/index.bin", spec, offsets, true));
+  std::vector<uint8_t> expected = {0x49, 0x54, 0x58, 0x54, 0x05, 0x04, 0x03, 0x02, 0xF1, 0x04, 0x03, 0x02,
+                                   0x01, 0xFE, 0xFF, 0xFF, 0xFF, 0x78, 0x56, 0x34, 0x12, 0xFC, 0xFF, 0xFF,
+                                   0xFF, 0x44, 0x33, 0x22, 0x11, 0xA5, 0x41, 0x00, 0x00, 0x00};
+  for (const size_t offset : offsets) {
+    for (unsigned shift = 0; shift < 32; shift += 8) expected.push_back(static_cast<uint8_t>(offset >> shift));
+  }
+  EXPECT_EQ(Storage.bytes("/cache/index.bin"), expected);
+  std::vector<size_t> loaded;
+  ASSERT_TRUE(txtlayout::loadPageIndex("/cache/index.bin", spec, loaded));
+  EXPECT_EQ(loaded, offsets);
+  EXPECT_EQ(txtlayout::readPageIndexOffset("/cache/index.bin", spec, 31), 0x80000000u);
+  EXPECT_EQ(txtlayout::readPageIndexOffset("/cache/index.bin", spec, 32), 0x80000000u);
+  EXPECT_FALSE(txtlayout::readPageIndexOffset("/cache/index.bin", spec, 64).has_value());
+}
+
+TEST_F(TxtPageIndexTest, MaximumOffsetCountReloadsWithoutWrappingAndRejectsOneMorePage) {
+  const auto spec = offsetArraySpec();
+  std::vector<size_t> offsets;
+  offsets.reserve(txtlayout::MAX_INDEX_PAGES + 1);
+  for (uint32_t i = 0; i < txtlayout::MAX_INDEX_PAGES; ++i) offsets.push_back(i * 65537u);
+  ASSERT_TRUE(txtlayout::savePageIndex("/cache/index.bin", spec, offsets, true));
+  const auto bytes = Storage.bytes("/cache/index.bin");
+  EXPECT_EQ(bytes.size(), 34U + 4U * 65535U);
+  std::vector<size_t> loaded;
+  ASSERT_TRUE(txtlayout::loadPageIndex("/cache/index.bin", spec, loaded));
+  EXPECT_EQ(loaded, offsets);
+  offsets.push_back(0xFFFFFFFFu);
+  EXPECT_FALSE(txtlayout::savePageIndex("/cache/index.bin", spec, offsets, true));
+  EXPECT_EQ(Storage.bytes("/cache/index.bin"), bytes);
+}
+
+TEST_F(TxtPageIndexTest, OffsetArrayRejectsEveryTruncatedPrefixWithoutReplacingCallerOffsets) {
+  const auto spec = offsetArraySpec();
+  ASSERT_TRUE(txtlayout::savePageIndex("/cache/index.bin", spec, boundaryOffsets(), true));
+  const auto bytes = Storage.bytes("/cache/index.bin");
+  for (size_t cut = 0; cut < bytes.size(); ++cut) {
+    SCOPED_TRACE(cut);
+    Storage.put("/cache/index.bin", std::vector<uint8_t>(bytes.begin(), bytes.begin() + cut));
+    std::vector<size_t> loaded{99};
+    EXPECT_FALSE(txtlayout::loadPageIndex("/cache/index.bin", spec, loaded));
+    EXPECT_EQ(loaded, (std::vector<size_t>{99}));
+  }
+}
+
+TEST_F(TxtPageIndexTest, OffsetArrayShortReadsDiscardEveryIncompletePayloadPrefix) {
+  const auto spec = offsetArraySpec();
+  ASSERT_TRUE(txtlayout::savePageIndex("/cache/index.bin", spec, boundaryOffsets(), true));
+  const size_t length = Storage.bytes("/cache/index.bin").size();
+  for (size_t cut = 34; cut < length; ++cut) {
+    SCOPED_TRACE(cut);
+    Storage.failReadsAt("/cache/index.bin", cut);
+    std::vector<size_t> loaded{99};
+    EXPECT_FALSE(txtlayout::loadPageIndex("/cache/index.bin", spec, loaded));
+    EXPECT_TRUE(loaded.empty());
+  }
+}
+
+TEST_F(TxtPageIndexTest, OffsetArrayShortWritesPreserveTheExactWrittenPrefix) {
+  const auto spec = offsetArraySpec();
+  const auto offsets = boundaryOffsets();
+  ASSERT_TRUE(txtlayout::savePageIndex("/cache/index.bin", spec, offsets, true));
+  const auto bytes = Storage.bytes("/cache/index.bin");
+  for (size_t cut = 0; cut < bytes.size(); ++cut) {
+    SCOPED_TRACE(cut);
+    HalFile output;
+    ASSERT_TRUE(Storage.openFileForWrite("TEST", "/cache/short.bin", output));
+    Storage.failWritesAt("/cache/short.bin", cut);
+    EXPECT_FALSE(txtlayout::writePageIndex(output, spec, offsets));
+    output.close();
+    EXPECT_EQ(Storage.bytes("/cache/short.bin"), (std::vector<uint8_t>(bytes.begin(), bytes.begin() + cut)));
+  }
+}
+
+TEST_F(TxtPageIndexTest, FailedOffsetArrayPromotionRestoresTheCompletePreviousIndex) {
+  const auto spec = offsetArraySpec();
+  const auto offsets = boundaryOffsets();
+  ASSERT_TRUE(txtlayout::savePageIndex("/cache/index.bin", spec, offsets, true));
+  const auto previous = Storage.bytes("/cache/index.bin");
+  auto replacement = spec;
+  ++replacement.viewportWidth;
+  Storage.failRenameFrom = "/cache/index.bin.tmp";
+  EXPECT_FALSE(txtlayout::savePageIndex("/cache/index.bin", replacement, offsets, true));
+  EXPECT_EQ(Storage.bytes("/cache/index.bin"), previous);
+  EXPECT_FALSE(Storage.exists("/cache/index.bin.tmp"));
+  EXPECT_FALSE(Storage.exists("/cache/index.bin.bak"));
+  std::vector<size_t> loaded;
+  ASSERT_TRUE(txtlayout::loadPageIndex("/cache/index.bin", spec, loaded));
+  EXPECT_EQ(loaded, offsets);
 }
 
 TEST_F(TxtPageIndexTest, FailedWideWritesAndPromotionKeepBothCompletedLayoutsReadable) {

@@ -521,22 +521,22 @@ std::string Epub::resolveCachePathForFilePath(const std::string& filepath, const
 
 bool Epub::findContentOpfFile(std::string* contentOpfFile) const {
   const auto containerPath = "META-INF/container.xml";
-  size_t containerSize;
+  ZipFile zip(filepath);
+  ZipFile::StreamEntry containerEntry;
 
-  // Get file size without loading it all into heap
-  if (!getItemSize(containerPath, &containerSize)) {
+  // Resolve once, closing the archive before allocating the XML parser.
+  if (!zip.resolveStreamEntry(containerPath, containerEntry)) {
     LOG_ERR("EBP", "Could not find or size META-INF/container.xml");
     return false;
   }
 
-  ContainerParser containerParser(containerSize);
+  ContainerParser containerParser(containerEntry.inflatedSize());
 
   if (!containerParser.setup()) {
     return false;
   }
 
-  // Stream read (reusing your existing stream logic)
-  if (!readItemContentsToStream(containerPath, containerParser, 512)) {
+  if (!zip.readFileToStream(containerPath, containerEntry, containerParser, 512)) {
     LOG_ERR("EBP", "Could not read META-INF/container.xml");
     return false;
   }
@@ -561,13 +561,15 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
 
   contentBasePath = contentOpfFilePath.substr(0, contentOpfFilePath.find_last_of('/') + 1);
 
-  size_t contentOpfSize;
-  if (!getItemSize(contentOpfFilePath, &contentOpfSize)) {
+  const std::string normalizedOpfPath = FsHelpers::normalisePath(contentOpfFilePath);
+  ZipFile zip(filepath);
+  ZipFile::StreamEntry contentOpfEntry;
+  if (!zip.resolveStreamEntry(normalizedOpfPath.c_str(), contentOpfEntry)) {
     LOG_ERR("EBP", "Could not get size of content.opf");
     return false;
   }
 
-  ContentOpfParser opfParser(getCachePath(), getBasePath(), contentOpfSize,
+  ContentOpfParser opfParser(getCachePath(), getBasePath(), contentOpfEntry.inflatedSize(),
                              writeSpineEntries ? bookMetadataCache.get() : nullptr, collectCssFiles, metadataOnly);
   if (!opfParser.setup()) {
     LOG_ERR("EBP", "Could not setup content.opf parser");
@@ -579,9 +581,8 @@ bool Epub::parseContentOpf(BookMetadataCache::BookMetadata& bookMetadata, const 
 
   // metadataOnly's allowEarlyStop lets the stream stop decompressing once the
   // parser has left </metadata>, well before the manifest/spine/guide of a
-  // large content.opf; readItemContentsToStream() reports that as a short
-  // write rather than a full success, so it is not itself a read failure here.
-  if (!readItemContentsToStream(contentOpfFilePath, opfParser, 1024, metadataOnly)) {
+  // large content.opf; the ZIP stream permits that deliberate short write.
+  if (!zip.readFileToStream(normalizedOpfPath.c_str(), contentOpfEntry, opfParser, 1024, metadataOnly)) {
     LOG_ERR("EBP", "Could not read content.opf");
     if (opfParser.failedForLowMemory()) {
       lastLoadFailure = OpenFailure::OutOfMemory;

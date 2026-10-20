@@ -4,6 +4,7 @@
 #include <Logging.h>
 #include <Serialization.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -107,14 +108,16 @@ inline bool loadPageIndex(const std::string& path, const PageIndexSpec& spec, st
   }
   offsets.clear();
   offsets.reserve(header.pageCount);
-  for (uint32_t i = 0; i < header.pageCount; ++i) {
-    uint32_t offset = 0;
-    if (!serialization::tryReadPod(file, offset)) {
+  uint32_t batch[32];
+  for (uint32_t base = 0; base < header.pageCount; base += 32) {
+    const uint32_t count = std::min<uint32_t>(32, header.pageCount - base);
+    const size_t bytes = count * sizeof(uint32_t);
+    if (file.read(batch, bytes) != static_cast<int>(bytes)) {
       offsets.clear();
       file.close();
       return false;
     }
-    offsets.push_back(offset);
+    for (uint32_t i = 0; i < count; ++i) offsets.push_back(batch[i]);
   }
   file.close();
   return true;
@@ -143,8 +146,12 @@ inline bool writePageIndex(HalFile& file, const PageIndexSpec& spec, const std::
                                        static_cast<uint32_t>(offsets.size()))) {
     return false;
   }
-  for (const size_t offset : offsets) {
-    if (!serialization::tryWritePod(file, static_cast<uint32_t>(offset))) return false;
+  uint32_t batch[32];
+  for (size_t base = 0; base < offsets.size(); base += 32) {
+    const size_t count = std::min<size_t>(32, offsets.size() - base);
+    for (size_t i = 0; i < count; ++i) batch[i] = static_cast<uint32_t>(offsets[base + i]);
+    const size_t bytes = count * sizeof(uint32_t);
+    if (file.write(reinterpret_cast<const uint8_t*>(batch), bytes) != bytes) return false;
   }
   return file.sync();
 }

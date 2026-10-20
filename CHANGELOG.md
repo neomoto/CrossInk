@@ -30,6 +30,15 @@
 - Reuse bounded EPUB/TXT layouts when switching viewports. Preserve the original
   active EPUB filename for synchronization and recover legacy TXT byte anchors
   before replacing their source index; progress and cache versions are unchanged.
+- Reuse call-local glyph resolution during normal, rotated, and scaled text
+  drawing, including fonts whose callbacks replace temporary glyph storage.
+- Narrow long sparse kerning rows with a bounded search and reuse accepted
+  line widths in the shared UI layout pass.
+- Read adjacent library metadata, sort keys, page fields, and page-index offsets
+  in bounded groups. Preserve wire formats, failure recovery, and readable
+  position matches before an SD-card error.
+- Reuse a validated ZIP entry descriptor between XML sizing and streaming.
+  Keep file handles closed between those operations and recheck archive identity.
 
 ### Fixed
 

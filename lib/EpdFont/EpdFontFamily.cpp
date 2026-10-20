@@ -17,29 +17,15 @@ struct GlyphMetrics {
 // The original codepoint has already missed. Keep aliases ahead of synthetic
 // fallbacks, and retain the resolved alias glyph rather than looking it up again.
 uint32_t normalizeMissingCodepoint(const EpdFontFamily& family, const uint32_t cp, const EpdFontFamily::Style style,
-                                   const EpdGlyph*& glyph) {
+                                   EpdFontFamily::GlyphData& glyphData) {
   const uint32_t aliasCp = syntheticGlyph::aliasCodepoint(cp);
   if (aliasCp != cp) {
-    glyph = family.findGlyphData(aliasCp, style).glyph;
-    return glyph ? aliasCp : REPLACEMENT_GLYPH;
+    glyphData = family.findGlyphData(aliasCp, style);
+    return glyphData.glyph ? aliasCp : REPLACEMENT_GLYPH;
   }
   if (syntheticGlyph::isSpaceFallback(cp)) return cp;
   if (syntheticGlyph::isSolid(cp) || syntheticGlyph::isGreekFallback(cp)) return cp;
   return REPLACEMENT_GLYPH;
-}
-
-const EpdGlyph* resolveDimensionGlyph(const EpdFontFamily& family, uint32_t& cp, const EpdFontFamily::Style style,
-                                      const bool isCombining) {
-  const EpdGlyph* glyph = family.findGlyphData(cp, style).glyph;
-  if (glyph) return glyph;
-  // Missing marks use only a real replacement glyph, anchored as the original
-  // mark; they must not acquire a synthetic replacement or become base glyphs.
-  if (isCombining) return family.findGlyphData(REPLACEMENT_GLYPH, style).glyph;
-
-  const uint32_t originalCp = cp;
-  cp = normalizeMissingCodepoint(family, cp, style, glyph);
-  if (glyph || cp == originalCp) return glyph;
-  return family.findGlyphData(cp, style).glyph;
 }
 
 bool measureSyntheticBase(const EpdFontFamily& family, const uint32_t cp, const EpdFontFamily::Style style,
@@ -77,7 +63,7 @@ bool measureSyntheticBase(const EpdFontFamily& family, const uint32_t cp, const 
 
 bool measureDimensionGlyph(const EpdFontFamily& family, uint32_t& cp, const EpdFontFamily::Style style,
                            const bool isCombining, const bool measureVertical, GlyphMetrics& metrics) {
-  if (const EpdGlyph* glyph = resolveDimensionGlyph(family, cp, style, isCombining)) {
+  if (const EpdGlyph* glyph = family.resolveGlyphData(cp, style, isCombining).glyph) {
     // Dynamic handlers can return ring-buffer storage. Consume only the needed
     // metrics now, before kerning (or any other callback) can reuse that storage.
     metrics = {glyph->width, measureVertical ? glyph->height : 0, glyph->advanceX, glyph->left,
@@ -251,6 +237,19 @@ EpdFontFamily::GlyphData EpdFontFamily::findGlyphData(const uint32_t cp, const S
   return {nullptr, nullptr};
 }
 
+EpdFontFamily::GlyphData EpdFontFamily::resolveGlyphData(uint32_t& cp, const Style style,
+                                                         const bool isCombining) const {
+  GlyphData glyphData = findGlyphData(cp, style);
+  if (glyphData.glyph) return glyphData;
+  // Missing marks retain their original anchor and only use a real replacement.
+  if (isCombining) return findGlyphData(REPLACEMENT_GLYPH, style);
+
+  const uint32_t originalCp = cp;
+  cp = normalizeMissingCodepoint(*this, cp, style, glyphData);
+  if (glyphData.glyph || cp == originalCp) return glyphData;
+  return findGlyphData(cp, style);
+}
+
 EpdFontFamily::GlyphData EpdFontFamily::getGlyphData(const uint32_t cp, const Style style) const {
   if (const GlyphData glyphData = findGlyphData(cp, style); glyphData.glyph) {
     return glyphData;
@@ -267,8 +266,8 @@ const EpdGlyph* EpdFontFamily::getGlyph(const uint32_t cp, const Style style) co
 }
 
 uint32_t EpdFontFamily::getFallbackCodepoint(const uint32_t cp, const Style style) const {
-  const EpdGlyph* glyph = findGlyphData(cp, style).glyph;
-  return glyph ? cp : normalizeMissingCodepoint(*this, cp, style, glyph);
+  GlyphData glyphData = findGlyphData(cp, style);
+  return glyphData.glyph ? cp : normalizeMissingCodepoint(*this, cp, style, glyphData);
 }
 
 bool EpdFontFamily::hasCodepoint(const uint32_t cp, const Style style) const {

@@ -201,6 +201,15 @@ struct Output : Print {
   }
 };
 
+struct LimitedOutput : Output {
+  explicit LimitedOutput(const size_t limit) : limit(limit) {}
+  size_t write(uint8_t byte) override { return write(&byte, 1); }
+  size_t write(const uint8_t* data, const size_t length) override {
+    return Output::write(data, std::min(length, limit - bytes.size()));
+  }
+  const size_t limit;
+};
+
 class ZipFileLookupTest : public testing::Test {
  protected:
   const std::string path = "fixture.epub";
@@ -407,6 +416,222 @@ TEST_F(ZipFileLookupTest, StoredAndRealDeflatedReadsPreserveBytesMethodsSizesAnd
   Output deflated;
   EXPECT_FALSE(zip.readStoredFileToStream("deflated.bin", deflated));
   EXPECT_TRUE(deflated.bytes.empty());
+}
+
+TEST_F(ZipFileLookupTest, ResolvedXmlEntriesCloseBetweenSizingAndExactStoredOrRealInflatedOutput) {
+  const std::string container =
+      R"(<container><rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>)";
+  const std::string opf = "<package><metadata><title>Exact XML &amp; UTF-8: \xC3\xA9</title></metadata>" +
+                          std::string(4097, ' ') + "<manifest/></package>";
+  for (const uint16_t method : {0, 8}) {
+    SCOPED_TRACE(method);
+    const Archive archive({{"META-INF/container.xml", container, method}, {"OPS/content.opf", opf, method}});
+    install(archive);
+    ZipFile zip(path);
+    for (const auto& entry : archive.entries) {
+      ZipFile::StreamEntry resolved;
+      ASSERT_TRUE(zip.resolveStreamEntry(entry.name.c_str(), resolved));
+      EXPECT_EQ(resolved.inflatedSize(), entry.contents.size());
+      EXPECT_FALSE(zip.isOpen());
+      Output output;
+      ASSERT_TRUE(zip.readFileToStream(entry.name.c_str(), resolved, output, 73));
+      EXPECT_EQ(std::string(output.bytes.begin(), output.bytes.end()), entry.contents);
+      EXPECT_FALSE(zip.isOpen());
+    }
+  }
+}
+
+TEST_F(ZipFileLookupTest, ResolvedEntriesRejectDefaultDifferentOwnerNamesAndFailedResolution) {
+  const auto archive = ordinaryArchive();
+  install(archive);
+  ZipFile zip(path);
+  ZipFile other(path);
+  ZipFile::StreamEntry entry;
+  Output output;
+  EXPECT_FALSE(zip.readFileToStream("first.bin", entry, output, 32));
+  ASSERT_TRUE(zip.resolveStreamEntry("first.bin", entry));
+  EXPECT_FALSE(other.readFileToStream("first.bin", entry, output, 32));
+  EXPECT_FALSE(zip.readFileToStream("middle.bin", entry, output, 32));
+  EXPECT_FALSE(zip.readFileToStream(nullptr, entry, output, 32));
+  EXPECT_TRUE(output.bytes.empty());
+  ASSERT_TRUE(zip.readFileToStream("first.bin", entry, output, 32));
+  EXPECT_EQ(std::string(output.bytes.begin(), output.bytes.end()), archive.entries[0].contents);
+  EXPECT_FALSE(zip.resolveStreamEntry("missing.bin", entry));
+  output.bytes.clear();
+  EXPECT_FALSE(zip.readFileToStream("first.bin", entry, output, 32));
+  EXPECT_TRUE(output.bytes.empty());
+}
+
+TEST_F(ZipFileLookupTest, ResolvedEntriesRejectReplacedResizedOrRetimestampedArchives) {
+  const auto archive = ordinaryArchive();
+  for (const uint32_t modified : {0u, 1u}) {
+    SCOPED_TRACE(modified);
+    Storage.put(path, archive.bytes, modified);
+    ZipFile zip(path);
+    ZipFile::StreamEntry entry;
+    ASSERT_TRUE(zip.resolveStreamEntry("first.bin", entry));
+    auto changedEntries = archive.entries;
+    changedEntries[0].contents = "other payload";
+    const Archive replacement(std::move(changedEntries));
+    ASSERT_EQ(replacement.bytes.size(), archive.bytes.size());
+    Storage.put(path, replacement.bytes, modified);
+    Output output;
+    EXPECT_FALSE(zip.readFileToStream("first.bin", entry, output, 32));
+    EXPECT_TRUE(output.bytes.empty());
+  }
+  install(archive);
+  ZipFile zip(path);
+  ZipFile::StreamEntry entry;
+  ASSERT_TRUE(zip.resolveStreamEntry("first.bin", entry));
+  Storage.put(path, archive.bytes, 2);
+  Output output;
+  EXPECT_FALSE(zip.readFileToStream("first.bin", entry, output, 32));
+  Bytes truncated = archive.bytes;
+  truncated.pop_back();
+  Storage.put(path, std::move(truncated));
+  EXPECT_FALSE(zip.readFileToStream("first.bin", entry, output, 32));
+  Storage.reset();
+  EXPECT_FALSE(zip.readFileToStream("first.bin", entry, output, 32));
+  EXPECT_TRUE(output.bytes.empty());
+  install(archive);
+  ASSERT_TRUE(zip.readFileToStream("first.bin", entry, output, 32));
+  EXPECT_EQ(std::string(output.bytes.begin(), output.bytes.end()), archive.entries[0].contents);
+}
+
+TEST_F(ZipFileLookupTest, ResolvedEntryRejectsChangedHeaderNameMethodSizesCrcAndLocalOffset) {
+  const auto archive = ordinaryArchive();
+  const size_t central = archive.directoryOffsets[0];
+  for (const size_t field : {0u, 10u, 16u, 20u, 24u, 28u, 42u, 46u}) {
+    SCOPED_TRACE(field);
+    install(archive);
+    ZipFile zip(path);
+    ZipFile::StreamEntry entry;
+    ASSERT_TRUE(zip.resolveStreamEntry("first.bin", entry));
+    Storage.overwrite(path, central + field, {static_cast<uint8_t>(archive.bytes[central + field] ^ 1)});
+    Output output;
+    EXPECT_FALSE(zip.readFileToStream("first.bin", entry, output, 32));
+    EXPECT_TRUE(output.bytes.empty());
+  }
+}
+
+TEST_F(ZipFileLookupTest, ResolvedEntryReportsFixedHeaderNameAndLocalHeaderReadOrSeekErrors) {
+  const auto archive = ordinaryArchive();
+  const size_t central = archive.directoryOffsets[0];
+  const size_t local = archive.localOffsets[0];
+  for (const auto fault : {std::pair<size_t, int>{central, -1},
+                           {central, 0},
+                           {central, 45},
+                           {central + 46, 3},
+                           {local, -1},
+                           {local, 0},
+                           {local, 29}}) {
+    SCOPED_TRACE(fault.first);
+    SCOPED_TRACE(fault.second);
+    install(archive);
+    ZipFile zip(path);
+    ZipFile::StreamEntry entry;
+    ASSERT_TRUE(zip.resolveStreamEntry("first.bin", entry));
+    Storage.failReadOnce(path, fault.first, fault.second);
+    Output output;
+    EXPECT_FALSE(zip.readFileToStream("first.bin", entry, output, 32));
+    EXPECT_TRUE(output.bytes.empty());
+    ASSERT_TRUE(zip.readFileToStream("first.bin", entry, output, 32));
+    EXPECT_EQ(std::string(output.bytes.begin(), output.bytes.end()), archive.entries[0].contents);
+  }
+  const size_t data = local + 30 + archive.entries[0].name.size() + archive.entries[0].extra.size();
+  for (const size_t offset : {central, local, data}) {
+    SCOPED_TRACE(offset);
+    install(archive);
+    ZipFile zip(path);
+    ZipFile::StreamEntry entry;
+    ASSERT_TRUE(zip.resolveStreamEntry("first.bin", entry));
+    Storage.failSeekOnce(path, offset);
+    Output output;
+    EXPECT_FALSE(zip.readFileToStream("first.bin", entry, output, 32));
+    EXPECT_TRUE(output.bytes.empty());
+  }
+}
+
+TEST_F(ZipFileLookupTest, ResolvedStreamsPreserveShortDataReadsErrorsAndDeliberateEarlyStop) {
+  for (const uint16_t method : {0, 8}) {
+    SCOPED_TRACE(method);
+    const Archive archive({{"content.xml", "<metadata>" + std::string(8193, 'x') + "</metadata>", method}});
+    const size_t data = archive.localOffsets[0] + 30 + archive.entries[0].name.size() + archive.entries[0].extra.size();
+    for (const int result : {-1, 0, 3}) {
+      SCOPED_TRACE(result);
+      install(archive);
+      ZipFile zip(path);
+      ZipFile::StreamEntry entry;
+      ASSERT_TRUE(zip.resolveStreamEntry("content.xml", entry));
+      Storage.failReadOnce(path, data, result);
+      Output output;
+      EXPECT_EQ(zip.readFileToStream("content.xml", entry, output, 73), result > 0);
+      if (result > 0) EXPECT_EQ(std::string(output.bytes.begin(), output.bytes.end()), archive.entries[0].contents);
+    }
+    install(archive);
+    ZipFile zip(path);
+    ZipFile::StreamEntry entry;
+    ASSERT_TRUE(zip.resolveStreamEntry("content.xml", entry));
+    LimitedOutput rejected(91);
+    EXPECT_FALSE(zip.readFileToStream("content.xml", entry, rejected, 73));
+    EXPECT_EQ(std::string(rejected.bytes.begin(), rejected.bytes.end()), archive.entries[0].contents.substr(0, 91));
+    LimitedOutput early(91);
+    EXPECT_TRUE(zip.readFileToStream("content.xml", entry, early, 73, true));
+    EXPECT_EQ(early.bytes, rejected.bytes);
+  }
+}
+
+TEST_F(ZipFileLookupTest, ResolvedStreamsStillRejectInvalidDeflateSizesMethodsAndLocalSignatures) {
+  const Archive archive({{"content.xml", "<metadata>" + std::string(4097, 'x') + "</metadata>", 8}});
+  const size_t central = archive.directoryOffsets[0];
+  for (const size_t field : {10u, 20u, 24u}) {
+    SCOPED_TRACE(field);
+    auto invalid = archive;
+    if (field == 10) {
+      put16(invalid.bytes, central + field, 0x0108);
+    } else {
+      put32(invalid.bytes, central + field, 1);
+    }
+    install(invalid);
+    ZipFile zip(path);
+    ZipFile::StreamEntry entry;
+    ASSERT_TRUE(zip.resolveStreamEntry("content.xml", entry));
+    Output output;
+    EXPECT_FALSE(zip.readFileToStream("content.xml", entry, output, 73));
+  }
+  auto invalid = archive;
+  put32(invalid.bytes, archive.localOffsets[0], 0);
+  install(invalid);
+  ZipFile zip(path);
+  ZipFile::StreamEntry entry;
+  ASSERT_TRUE(zip.resolveStreamEntry("content.xml", entry));
+  Output output;
+  EXPECT_FALSE(zip.readFileToStream("content.xml", entry, output, 73));
+  EXPECT_TRUE(output.bytes.empty());
+}
+
+TEST_F(ZipFileLookupTest, ResolvedEntryRejectsShortOrFailedEocdReadsAndSeeksBeforePublishingSize) {
+  const auto archive = ordinaryArchive();
+  const size_t tail = archive.bytes.size() - 1024;
+  for (const int result : {-1, 0, 3, 21, 1023}) {
+    SCOPED_TRACE(result);
+    install(archive);
+    ZipFile zip(path);
+    ZipFile::StreamEntry entry;
+    Storage.failReadOnce(path, tail, result);
+    EXPECT_FALSE(zip.resolveStreamEntry("first.bin", entry));
+    EXPECT_EQ(entry.inflatedSize(), 0u);
+    EXPECT_FALSE(zip.isOpen());
+    ASSERT_TRUE(zip.resolveStreamEntry("first.bin", entry));
+    EXPECT_EQ(entry.inflatedSize(), archive.entries[0].contents.size());
+  }
+  install(archive);
+  ZipFile zip(path);
+  ZipFile::StreamEntry entry;
+  Storage.failSeekOnce(path, tail);
+  EXPECT_FALSE(zip.resolveStreamEntry("first.bin", entry));
+  EXPECT_EQ(entry.inflatedSize(), 0u);
+  ASSERT_TRUE(zip.resolveStreamEntry("first.bin", entry));
 }
 
 TEST_F(ZipFileLookupTest, CompressionMethodHighByteIsNotTruncated) {

@@ -4,8 +4,10 @@
 #include <Epub/hyphenation/Hyphenator.h>
 #include <GfxRenderer.h>
 #include <HalStorage.h>
+#include <Serialization.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 
@@ -59,6 +61,53 @@ struct TextLayoutBackingTest : testing::Test {
     return Storage.bytes("layout");
   }
 };
+
+TEST_F(TextLayoutBackingTest, MixedWidthPodGroupKeepsOutputsOnPartialReadsAndStopsAtRecordBoundary) {
+  std::vector<uint8_t> bytes = {0x91, 0xfb, 0xff, 0x78, 0x56, 0x34, 0x12, 0x08,
+                                0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x01};
+  bytes.insert(bytes.end(), 48, 0xa5);
+  bytes.back() = 0x2e;
+  bytes.push_back(0xd7);  // The next record must not be consumed by the 64-byte group.
+  for (size_t cut = 0; cut <= 64; ++cut) {
+    SCOPED_TRACE(cut);
+    Storage.put("mixed-pod-group", bytes);
+    if (cut < 64) Storage.data("mixed-pod-group").readFailAt = cut;
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "mixed-pod-group", input));
+    uint8_t first = 0x3c;
+    int16_t signedValue = 777;
+    uint32_t value = 0xaabbccdd;
+    uint64_t wideValue = UINT64_C(0xfedcba9876543210);
+    bool flag = false;
+    uint8_t payload[48];
+    std::fill_n(payload, sizeof(payload), 0x6a);
+    const bool complete = serialization::tryReadPodGroup(input, first, signedValue, value, wideValue, flag, payload);
+    ASSERT_EQ(complete, cut == 64);
+    if (!complete) {
+      EXPECT_EQ(first, 0x3c);
+      EXPECT_EQ(signedValue, 777);
+      EXPECT_EQ(value, 0xaabbccddU);
+      EXPECT_EQ(wideValue, UINT64_C(0xfedcba9876543210));
+      EXPECT_FALSE(flag);
+      EXPECT_EQ(std::vector<uint8_t>(payload, payload + sizeof(payload)), std::vector<uint8_t>(48, 0x6a));
+      input.close();
+      continue;
+    }
+    EXPECT_EQ(first, 0x91);
+    EXPECT_EQ(signedValue, -5);
+    EXPECT_EQ(value, 0x12345678U);
+    EXPECT_EQ(wideValue, UINT64_C(0x0102030405060708));
+    EXPECT_TRUE(flag);
+    EXPECT_EQ(std::vector<uint8_t>(payload, payload + sizeof(payload)),
+              std::vector<uint8_t>(bytes.begin() + 16, bytes.begin() + 64));
+    EXPECT_EQ(input.available(), 1);
+    uint8_t nextRecord = 0;
+    ASSERT_TRUE(serialization::tryReadPod(input, nextRecord));
+    EXPECT_EQ(nextRecord, 0xd7);
+    input.close();
+  }
+}
+
 TEST_F(TextLayoutBackingTest, SameSerializedLinesAcrossPoolsFontsAndReadingAids) {
   std::ofstream reference;
   if (const char* path = std::getenv("LAYOUT_REFERENCE_OUT")) reference.open(path, std::ios::binary);
@@ -227,6 +276,60 @@ TEST_F(TextLayoutBackingTest, ReadingAidLineRejectsEveryShortWriteAndTruncatedPa
   }
 }
 
+TEST_F(TextLayoutBackingTest, ReadingAidLineRejectsPartialReadsBeforePhysicalEndOfFile) {
+  const auto& bytes = readingAidCacheBytes();
+  for (size_t cut = 0; cut < bytes.size(); ++cut) {
+    SCOPED_TRACE(cut);
+    Storage.put("partial-line", bytes);
+    Storage.data("partial-line").readFailAt = cut;
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "partial-line", input));
+    EXPECT_EQ(TextBlock::deserialize(input), nullptr);
+    input.close();
+  }
+}
+
+TEST_F(TextLayoutBackingTest, PartialTableHeadersKeepExistingOutputMetadataAndLines) {
+  auto line = std::shared_ptr<TextBlock>(new TextBlock(cacheLineWithReadingAids()));
+  for (size_t cut = 0; cut < 3; ++cut) {
+    SCOPED_TRACE(cut);
+    Storage.put("partial-cell-header", {0x01, 0x02, 0x00});
+    Storage.data("partial-cell-header").readFailAt = cut;
+    TableFragmentCell cell;
+    cell.colSpan = 7;
+    cell.lines.push_back(line);
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "partial-cell-header", input));
+    EXPECT_FALSE(TableFragmentCell::deserialize(input, cell));
+    EXPECT_FALSE(cell.isHeader);
+    EXPECT_EQ(cell.colSpan, 7);
+    ASSERT_EQ(cell.lines.size(), 1U);
+    EXPECT_EQ(cell.lines[0], line);
+    input.close();
+  }
+  for (size_t cut = 0; cut < 4; ++cut) {
+    SCOPED_TRACE(cut);
+    Storage.put("partial-row-header", {0x4a, 0x00, 0x01, 0x00});
+    Storage.data("partial-row-header").readFailAt = cut;
+    TableFragmentRow row;
+    row.height = 99;
+    TableFragmentCell cell;
+    cell.colSpan = 3;
+    cell.lines.push_back(line);
+    row.cells.push_back(std::move(cell));
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "partial-row-header", input));
+    EXPECT_FALSE(TableFragmentRow::deserialize(input, row));
+    EXPECT_EQ(row.height, 99);
+    EXPECT_FALSE(row.headerSeparator);
+    ASSERT_EQ(row.cells.size(), 1U);
+    EXPECT_EQ(row.cells[0].colSpan, 3);
+    ASSERT_EQ(row.cells[0].lines.size(), 1U);
+    EXPECT_EQ(row.cells[0].lines[0], line);
+    input.close();
+  }
+}
+
 TEST_F(TextLayoutBackingTest, ReadingAidLineRejectsCorruptMetadataAndWordBoundaries) {
   const std::vector<std::pair<size_t, uint8_t>> corruptions = {
       {2, 2},    // Boolean header flag is not 0 or 1.
@@ -356,5 +459,18 @@ TEST_F(TextLayoutBackingTest, RealTextPageRejectsEveryShortWriteAndTruncatedReco
     FsFile input;
     ASSERT_TRUE(Storage.openFileForRead("test", "short-page", input));
     EXPECT_EQ(Page::deserialize(input), nullptr);
+  }
+}
+
+TEST_F(TextLayoutBackingTest, RealTextPageRejectsPartialReadsBeforePhysicalEndOfFile) {
+  const auto bytes = persistedTextPageBytes();
+  for (size_t cut = 0; cut < bytes.size(); ++cut) {
+    SCOPED_TRACE(cut);
+    Storage.put("partial-page", bytes);
+    Storage.data("partial-page").readFailAt = cut;
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "partial-page", input));
+    EXPECT_EQ(Page::deserialize(input), nullptr);
+    input.close();
   }
 }

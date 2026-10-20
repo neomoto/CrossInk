@@ -34,6 +34,10 @@ class EpdFontFamily {
   bool textFitsWidth(const char* string, int maxWidth, Style style = REGULAR) const;
   const EpdFontData* getData(Style style = REGULAR) const;
   GlyphData findGlyphData(uint32_t cp, Style style = REGULAR) const;
+  // Normalizes aliases/missing bases while retaining the matched bitmap owner.
+  // The result is transient: consume it before another font callback can evict it.
+  // Combining marks keep cp unchanged and only fall back to a real replacement.
+  GlyphData resolveGlyphData(uint32_t& cp, Style style = REGULAR, bool isCombining = false) const;
   GlyphData getGlyphData(uint32_t cp, Style style = REGULAR) const;
   const EpdGlyph* getGlyph(uint32_t cp, Style style = REGULAR) const;
   uint32_t getFallbackCodepoint(uint32_t cp, Style style = REGULAR) const;

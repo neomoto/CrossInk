@@ -42,6 +42,15 @@ ReaderRenderSpec renderSpec() {
   return spec;
 }
 
+uint32_t readUint32At(const std::vector<uint8_t>& bytes, const size_t position) {
+  return static_cast<uint32_t>(bytes.at(position)) | (static_cast<uint32_t>(bytes.at(position + 1)) << 8) |
+         (static_cast<uint32_t>(bytes.at(position + 2)) << 16) | (static_cast<uint32_t>(bytes.at(position + 3)) << 24);
+}
+
+void writeUint32At(std::vector<uint8_t>& bytes, const size_t position, const uint32_t value) {
+  for (size_t i = 0; i < sizeof(value); ++i) bytes.at(position + i) = static_cast<uint8_t>(value >> (i * 8));
+}
+
 struct SectionHarness {
   Epub epub{"/books/test.epub", "/cache"};
   GfxRenderer renderer;
@@ -221,7 +230,7 @@ TEST_F(SectionPersistenceTest, RejectsCachesFromPreviousLayoutRevisions) {
     EXPECT_EQ(metadata.getCachedPageCount(), 2);
   }
 }
-TEST_F(SectionPersistenceTest, PositionLookupBatchesReadsAcrossALongChapter) {
+TEST_F(SectionPersistenceTest, ReverseLookupsResolvePagesAcrossALongChapter) {
   SectionHarness harness;
   harness.begin();
   harness.appendPages(1025);
@@ -229,12 +238,167 @@ TEST_F(SectionPersistenceTest, PositionLookupBatchesReadsAcrossALongChapter) {
   harness.finishSuccessfulCommit();
   Section reopened(harness.epub, 0, harness.renderer);
   ASSERT_TRUE(reopened.loadSectionFile(harness.spec));
-  const size_t readsBefore = Storage.reads(reopened.filePath);
-  const size_t seeksBefore = Storage.seeks(reopened.filePath);
-  EXPECT_EQ(reopened.getPageForVisibleTextOffset(1024 * 17), 1024);
-  // Five header reads plus ceil(1025/32) batches, and just three seeks.
-  EXPECT_LE(Storage.reads(reopened.filePath) - readsBefore, 38U);
-  EXPECT_LE(Storage.seeks(reopened.filePath) - seeksBefore, 3U);
+  for (const uint16_t page : {0, 31, 32, 63, 64, 1024}) {
+    SCOPED_TRACE(page);
+    EXPECT_EQ(reopened.getPageForParagraphIndex(page * 3), page);
+    EXPECT_EQ(reopened.getPageForListItemIndex(page * 5), page);
+    EXPECT_EQ(reopened.getPageForVisibleTextOffset(page * 17), page);
+  }
+  EXPECT_EQ(reopened.getPageForParagraphIndex(3073), 1024);
+  EXPECT_EQ(reopened.getPageForListItemIndex(5121), 1024);
+}
+
+TEST_F(SectionPersistenceTest, IndexLookupsKeepTheFirstDuplicateAcrossChunkBoundaries) {
+  SectionHarness harness;
+  harness.begin();
+  for (size_t i = 0; i < 66; ++i) {
+    ASSERT_EQ(harness.section.build_->pageIndex.prepareAppend(), SectionPageIndex::PrepareResult::Ready);
+    const uint32_t position = harness.section.onPageComplete(std::make_unique<Page>());
+    const uint16_t paragraph = i < 31 ? 0 : (i <= 64 ? 100 : 65534);
+    const uint16_t listItem = i < 32 ? 0 : (i <= 64 ? 500 : 65534);
+    harness.section.build_->pageIndex.appendPrepared({position, paragraph, listItem, static_cast<uint32_t>(i * 17)});
+  }
+  ASSERT_TRUE(harness.commit(kFullVersion));
+  harness.finishSuccessfulCommit();
+  Section reopened(harness.epub, 0, harness.renderer);
+  ASSERT_TRUE(reopened.loadSectionFile(harness.spec));
+  EXPECT_EQ(reopened.getPageForParagraphIndex(0), 0);
+  EXPECT_EQ(reopened.getPageForParagraphIndex(1), 31);
+  EXPECT_EQ(reopened.getPageForParagraphIndex(100), 31);
+  EXPECT_EQ(reopened.getPageForParagraphIndex(101), 65);
+  EXPECT_EQ(reopened.getPageForParagraphIndex(65534), 65);
+  EXPECT_EQ(reopened.getPageForParagraphIndex(65535), 65);
+  EXPECT_EQ(reopened.getPageForListItemIndex(0), 0);
+  EXPECT_EQ(reopened.getPageForListItemIndex(1), 32);
+  EXPECT_EQ(reopened.getPageForListItemIndex(500), 32);
+  EXPECT_EQ(reopened.getPageForListItemIndex(501), 65);
+  EXPECT_EQ(reopened.getPageForListItemIndex(65534), 65);
+  EXPECT_EQ(reopened.getPageForListItemIndex(65535), 65);
+}
+
+TEST_F(SectionPersistenceTest, MaximumIndexLutCountDoesNotWrapTheLastScanChunk) {
+  SectionHarness harness;
+  harness.begin();
+  harness.appendPages(65535, 1, 1, 1);
+  ASSERT_TRUE(harness.commit(kFullVersion));
+  harness.finishSuccessfulCommit();
+  Section reopened(harness.epub, 0, harness.renderer);
+  ASSERT_TRUE(reopened.loadSectionFile(harness.spec));
+  EXPECT_EQ(reopened.getPageForParagraphIndex(65534), 65534);
+  EXPECT_EQ(reopened.getPageForParagraphIndex(65535), 65534);
+  EXPECT_EQ(reopened.getPageForListItemIndex(65534), 65534);
+  EXPECT_EQ(reopened.getPageForListItemIndex(65535), 65534);
+}
+
+TEST_F(SectionPersistenceTest, IndexLookupsRejectEveryTruncatedPrefixUntilTheirOwnLutIsComplete) {
+  SectionHarness harness;
+  harness.begin();
+  harness.appendPages(65);
+  ASSERT_TRUE(harness.commit(kFullVersion));
+  harness.finishSuccessfulCommit();
+  Section reopened(harness.epub, 0, harness.renderer);
+  ASSERT_TRUE(reopened.loadSectionFile(harness.spec));
+  const auto bytes = Storage.bytes(reopened.filePath);
+  const size_t paragraph = readUint32At(bytes, harness.serializedHeaderSize - 3 * sizeof(uint32_t));
+  const size_t listItem = readUint32At(bytes, harness.serializedHeaderSize - 2 * sizeof(uint32_t));
+  const size_t paragraphEnd = paragraph + sizeof(uint16_t) + 65 * sizeof(uint16_t);
+  const size_t listItemEnd = listItem + 65 * sizeof(uint16_t);
+  for (size_t cut = 0; cut < bytes.size(); ++cut) {
+    SCOPED_TRACE(cut);
+    Storage.put(reopened.filePath, std::vector<uint8_t>(bytes.begin(), bytes.begin() + cut));
+    EXPECT_EQ(reopened.getPageForParagraphIndex(192), cut >= paragraphEnd ? std::optional<uint16_t>{64} : std::nullopt);
+    EXPECT_EQ(reopened.getPageForListItemIndex(320), cut >= listItemEnd ? std::optional<uint16_t>{64} : std::nullopt);
+  }
+}
+
+TEST_F(SectionPersistenceTest, IndexShortReadsPreserveAnyCompleteFirstMatchBeforeTheFailure) {
+  SectionHarness harness;
+  harness.begin();
+  harness.appendPages(65);
+  ASSERT_TRUE(harness.commit(kFullVersion));
+  harness.finishSuccessfulCommit();
+  Section reopened(harness.epub, 0, harness.renderer);
+  ASSERT_TRUE(reopened.loadSectionFile(harness.spec));
+  const auto bytes = Storage.bytes(reopened.filePath);
+  const size_t paragraphEntries =
+      readUint32At(bytes, harness.serializedHeaderSize - 3 * sizeof(uint32_t)) + sizeof(uint16_t);
+  const size_t listItemEntries = readUint32At(bytes, harness.serializedHeaderSize - 2 * sizeof(uint32_t));
+  for (const uint16_t page : {0, 31, 32, 64}) {
+    SCOPED_TRACE(page);
+    for (size_t prefix = 0; prefix <= 65 * sizeof(uint16_t); ++prefix) {
+      SCOPED_TRACE(prefix);
+      const auto expected =
+          prefix >= (static_cast<size_t>(page) + 1) * sizeof(uint16_t) ? std::optional<uint16_t>{page} : std::nullopt;
+      Storage.failReadsAt(reopened.filePath, paragraphEntries + prefix);
+      EXPECT_EQ(reopened.getPageForParagraphIndex(page * 3), expected);
+      Storage.failReadsAt(reopened.filePath, listItemEntries + prefix);
+      EXPECT_EQ(reopened.getPageForListItemIndex(page * 5), expected);
+    }
+  }
+}
+
+TEST_F(SectionPersistenceTest, IndexReadErrorsPreserveCompleteMatchesBeforeTheFailedSector) {
+  SectionHarness harness;
+  harness.begin();
+  harness.appendPages(65);
+  ASSERT_TRUE(harness.commit(kFullVersion));
+  harness.finishSuccessfulCommit();
+  Section reopened(harness.epub, 0, harness.renderer);
+  ASSERT_TRUE(reopened.loadSectionFile(harness.spec));
+  const auto bytes = Storage.bytes(reopened.filePath);
+  const size_t paragraphEntries =
+      readUint32At(bytes, harness.serializedHeaderSize - 3 * sizeof(uint32_t)) + sizeof(uint16_t);
+  const size_t listItemEntries = readUint32At(bytes, harness.serializedHeaderSize - 2 * sizeof(uint32_t));
+  for (const uint16_t page : {0, 30, 31, 32, 63, 64}) {
+    SCOPED_TRACE(page);
+    for (const size_t prefix : {0, 1, 2, 3, 62, 63, 64, 65, 66, 67, 128, 129, 130}) {
+      SCOPED_TRACE(prefix);
+      const auto expected =
+          prefix >= (static_cast<size_t>(page) + 1) * sizeof(uint16_t) ? std::optional<uint16_t>{page} : std::nullopt;
+      Storage.failReadsWithErrorAt(reopened.filePath, paragraphEntries + prefix);
+      EXPECT_EQ(reopened.getPageForParagraphIndex(page * 3), expected);
+      EXPECT_EQ(reopened.getPageForParagraphIndex(65535), prefix == 130 ? std::optional<uint16_t>{64} : std::nullopt);
+      Storage.failReadsWithErrorAt(reopened.filePath, listItemEntries + prefix);
+      EXPECT_EQ(reopened.getPageForListItemIndex(page * 5), expected);
+      EXPECT_EQ(reopened.getPageForListItemIndex(65535), prefix == 130 ? std::optional<uint16_t>{64} : std::nullopt);
+    }
+  }
+}
+
+TEST_F(SectionPersistenceTest, IndexLookupsRejectExtremeOffsetsAndOversizedOrEmptyLuts) {
+  SectionHarness harness;
+  harness.begin();
+  harness.appendPages(65);
+  ASSERT_TRUE(harness.commit(kFullVersion));
+  harness.finishSuccessfulCommit();
+  Section reopened(harness.epub, 0, harness.renderer);
+  ASSERT_TRUE(reopened.loadSectionFile(harness.spec));
+  const auto original = Storage.bytes(reopened.filePath);
+  const size_t paragraphField = harness.serializedHeaderSize - 3 * sizeof(uint32_t);
+  const size_t listItemField = harness.serializedHeaderSize - 2 * sizeof(uint32_t);
+  for (const uint32_t offset : {0U, static_cast<uint32_t>(original.size()), 0xFFFFFFFEU, 0xFFFFFFFFU}) {
+    SCOPED_TRACE(offset);
+    auto bytes = original;
+    writeUint32At(bytes, paragraphField, offset);
+    Storage.put(reopened.filePath, std::move(bytes));
+    EXPECT_FALSE(reopened.getPageForParagraphIndex(0).has_value());
+    EXPECT_FALSE(reopened.getPageForListItemIndex(0).has_value());
+    bytes = original;
+    writeUint32At(bytes, listItemField, offset);
+    Storage.put(reopened.filePath, std::move(bytes));
+    EXPECT_FALSE(reopened.getPageForListItemIndex(0).has_value());
+    EXPECT_EQ(reopened.getPageForParagraphIndex(0), 0);
+  }
+  const size_t paragraph = readUint32At(original, paragraphField);
+  for (const uint16_t count : {0, 65535}) {
+    SCOPED_TRACE(count);
+    auto bytes = original;
+    bytes.at(paragraph) = static_cast<uint8_t>(count);
+    bytes.at(paragraph + 1) = static_cast<uint8_t>(count >> 8);
+    Storage.put(reopened.filePath, std::move(bytes));
+    EXPECT_FALSE(reopened.getPageForParagraphIndex(0).has_value());
+    EXPECT_FALSE(reopened.getPageForListItemIndex(0).has_value());
+  }
 }
 
 TEST_F(SectionPersistenceTest, PositionLookupPreservesFirstAndLastDuplicateAcrossBatchBoundary) {
@@ -575,6 +739,8 @@ TEST_F(SectionPersistenceTest, FailedNewSpecPromotionPreservesTheActiveAndAltern
   Section metadata(fixture.narrow.epub, 0, fixture.narrow.renderer);
   EXPECT_EQ(metadata.getCachedPageCount(), 3);
   EXPECT_EQ(metadata.getPageForAnchor("destination"), 2);
+  EXPECT_EQ(metadata.getPageForParagraphIndex(12), 2);
+  EXPECT_EQ(metadata.getPageForListItemIndex(20), 2);
   EXPECT_EQ(metadata.getPageForVisibleTextOffset(68, true), 2);
 }
 

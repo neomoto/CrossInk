@@ -304,6 +304,154 @@ new monochrome helpers are 1–6, and the kerning wrapper is 9 for bitmap fonts 
 10 with scalable-font dispatch. The ASCII shortcut adds one decision while
 avoiding CJK checks for proven ASCII pairs.
 
+### Bounded read and font-lookup optimization
+
+This follow-on pass uses eight implementation agents running
+`openai-codex/gpt-6.1-sol` at `xhigh`, plus a safety reviewer. Runtime model
+receipts are retained; an inherited prompt header is not model provenance.
+
+Changes reuse resolved glyphs within one draw call, narrow long sparse kerning
+rows, retain accepted UI line widths, and group adjacent serialized reads.
+Library metadata and sort keys use sequential reads. XML metadata sizing passes
+a bounded ZIP entry descriptor to streaming; the reader closes the file between
+operations and validates the entry again before using it. There is no new
+whole-font or whole-archive cache.
+
+The device-code comparison keeps the native SDK fixed at local `43dbb83`.
+It compares reader baseline `b114c587` against the new reader and FreeInkUI
+sources. Native binaries start with SHA-256 `d7c271bf` and `9d8c85d1`.
+The separate packed-pixel simulator optimization is excluded from this table.
+There are three alternating before/after pairs for each of 16 workloads:
+96 normal app launches, no smoke-driver shortcuts. Render numbers are the
+median of three run medians, measured inside the native app with the same
+instrumentation on both sides. They are not physical e-ink timings.
+
+| Workload | Before render (ms) | After render (ms) |
+| --- | ---: | ---: |
+| Library, short titles | 1.275 | 1.261 |
+| Library, long titles | 3.547 | 3.493 |
+| Settings tabs | 1.072 | 1.044 |
+| Settings rows | 1.075 | 1.046 |
+| Reader menu | 1.138 | 1.146 |
+| Home | 1.140 | 1.122 |
+| Library sort picker | 2.836 | 2.919 |
+| Arabic settings, large text | 1.261 | 1.263 |
+| EPUB, cold cache | 6.553 | 5.735 |
+| EPUB, warm cache | 6.581 | 5.677 |
+| TXT, cold cache | 5.290 | 5.374 |
+| TXT, warm cache | 5.586 | 5.335 |
+| EPUB with JPEG and PNG images | 7.120 | 6.801 |
+
+| Index operation, 1,000 books | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| Cold scan: 1,000 parsed | 272 | 262 |
+| Unchanged scan: 1,000 reused | 66 | 69 |
+| One changed book: 1 parsed, 999 reused | 101 | 67 |
+
+Small differences and mixed image/sort results are noisy; this is not an
+across-the-board speedup claim. In particular, unchanged indexing does not
+improve in these runs. Every one of 129 full SDL surface comparisons matches,
+and settings, progress, and bookmarks have no before/after differences.
+Public fixture book hashes are unchanged.
+
+The full native suite passes 1,137 CTest entries; the targeted ASan/UBSan suite
+passes 278. FreeInkUI passes 296,126 host checks. An independent packed-pixel
+oracle passes ASan/UBSan checks of byte/plane combinations, inversion,
+incomplete planes, and tail boundaries.
+
+The safety review found and closed a batched SD-read error case. SdFat can
+copy a valid prefix and advance its cursor before returning `-1`. The inverse
+page lookup now retains complete position matches in that prefix, rather than
+discarding them. A fail-before/pass-after regression covers matches before
+the failed sector and across the 32-entry batch boundary.
+
+The ESP32-C3 image is 6,337,456 bytes: 1,968 bytes larger, with 216,144 bytes
+of OTA-partition headroom. Static RAM remains 64,832 bytes. Offline checksum
+and validation hash pass. New scratch storage is bounded: 32 bytes for UI
+widths, 99 bytes for a sort-key prefix, 128 bytes for TXT offsets, and 64 bytes
+for EPUB inverse offsets. Production grouped POD reads use at most 26 bytes
+of payload scratch. These are separate call paths, not a measured peak stack.
+No physical reader was accessed; peak device heap, stack, and latency remain
+unmeasured.
+
+Evidence is retained under `crossink-sol-performance-5hh69hvu` in the macOS
+temporary directory, including paired results, source and model receipts,
+frozen binaries, and the offline image. Firmware SHA-256 is
+`bfe70173a252dcdf603bcda514261b52f77a97fab1fc7a768f10c9165d81124d`.
+The local SDK builds do not establish that unpublished dependency commits
+can be fetched by someone else.
+FreeInkUI is retained in local submodule commit `2cad542`; the native simulator
+change is local commit `8deaedc`. Neither was pushed. The reader's public native
+simulator pin remains `6c768461`; testing uses the ignored local symlink config.
+Before publishing the reader branch, its new FreeInkUI submodule commit must
+be available from the configured submodule remote.
+
+#### Simulator-only conversion attribution
+
+A separate 24-launch comparison keeps the new reader and FreeInkUI fixed.
+Only the native packed-pixel converter changes, from binary `9d8c85d1` to
+`00dd8b09`. All 36 full SDL surface pairs and retained app states match.
+
+| Native workload | Old converter render (ms) | New converter render (ms) |
+| --- | ---: | ---: |
+| Library, long titles | 2.037 | 1.877 |
+| EPUB, warm cache | 3.933 | 3.063 |
+| TXT, warm cache | 3.658 | 2.534 |
+| EPUB with JPEG and PNG images | 4.772 | 3.523 |
+
+These are paired native-app results, not X3 gains. Absolute host timings drift
+between batches; do not combine this table with the device-code table to
+calculate a cumulative speedup. The converter adds no frame buffer and leaves
+SDL pacing and shared-buffer ownership unchanged.
+
+#### Input-to-presentation check
+
+Eighteen normal launches compare baseline `d7c271bf` with the complete native
+candidate `00dd8b09`. Each launch has 24 isolated release-triggered page/list
+actions. All 432 input-to-render-to-valid-present joins succeed, with no invalid
+present records. The older render logger is disabled for this experiment.
+
+| Activity | Release to SDL present, before (ms) | After (ms) |
+| --- | ---: | ---: |
+| EPUB | 17.281 | 18.096 |
+| TXT | 18.606 | 18.376 |
+| Library | 18.643 | 18.179 |
+
+Values are pooled medians of 72 actions per activity and variant. This pass
+reduces rendering work but does not establish a button-to-presentation latency
+win. The requested 80 ms hold is separate from these release-edge timings;
+press-to-present medians remain about 96–98 ms. SDL present return is not
+physical panel visibility. Input polling, debounce, refresh waveforms, and
+presentation pacing have not been shortened.
+
+Matched Instruments profiles retain the before/after call stacks for long-title
+UI, warm EPUB, cold indexing, and one-book reconciliation. In warm EPUB, the
+unchanged native grayscale converter remains a major sampled cost in this
+device-code-only comparison. Profile samples are diagnostic, not substitutes
+for the repeated unprofiled timing results above.
+
+#### Rotation and resume safety
+
+Fresh production-reader replays pass for the baseline, device-code candidate,
+and complete native candidate. Each produces the same 43 grayscale captures
+and performs only two EPUB section builds. Four orientations, content anchors,
+settings persistence, Power hold/release, and disabled/flat/noise/overlay gates
+remain intact.
+
+| Replay variant | Sampled render-thread CPU (ms) | Section builds |
+| --- | ---: | ---: |
+| Previous optimized baseline | 365 | 2 |
+| New device code, unchanged native converter | 345 | 2 |
+| Complete native candidate | 296 | 2 |
+
+This is one profiled replay per variant. It does not establish a corresponding
+wall-clock or physical rotation-latency improvement.
+
+A separate normal TXT scenario rotates page zero from portrait to landscape,
+exits to Home, and reopens. All four complete SDL captures match. The six-byte
+zero progress anchor and original narrow index remain intact; the wide index
+is byte-identical to the baseline. This scenario does not use a smoke driver.
+
 
 ## Flash and monitor
 

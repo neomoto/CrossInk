@@ -1541,6 +1541,43 @@ std::optional<uint16_t> Section::getPageForAnchor(const std::string& anchor) con
   return std::nullopt;
 }
 
+namespace {
+std::optional<uint32_t> readInverseLutOffset(FsFile& file, const uint32_t headerPosition, const uint32_t fileSize) {
+  if (!file.seek(headerPosition)) return std::nullopt;
+  uint32_t offset = 0;
+  if (!serialization::tryReadPod(file, offset) || offset == 0 || offset >= fileSize) return std::nullopt;
+  return offset;
+}
+
+std::optional<uint16_t> findPageInIndexLut(FsFile& file, const uint16_t count, const uint16_t index) {
+  uint16_t values[32];  // 64 bytes, with no persistent lookup buffer.
+  for (uint32_t base = 0; base < count; base += 32) {
+    const uint32_t batch = std::min<uint32_t>(32, count - base);
+    const size_t bytes = batch * sizeof(uint16_t);
+    const size_t positionBefore = file.position();
+    const int bytesRead = file.read(values, bytes);
+    size_t initializedBytes = 0;
+    if (bytesRead < 0) {
+      // SdFat may copy earlier sectors before a later sector returns -1.
+      // Only the bounded cursor advance identifies that initialized prefix.
+      const size_t positionAfter = file.position();
+      if (positionAfter < positionBefore || positionAfter - positionBefore > bytes) return std::nullopt;
+      initializedBytes = positionAfter - positionBefore;
+    } else {
+      initializedBytes = static_cast<size_t>(bytesRead);
+    }
+    const size_t entriesRead = initializedBytes / sizeof(uint16_t);
+    // A complete first match remains valid before either a short read or a
+    // later-sector error. Never inspect an incomplete entry or continue past it.
+    for (size_t i = 0; i < entriesRead; ++i) {
+      if (values[i] >= index) return static_cast<uint16_t>(base + i);
+    }
+    if (bytesRead != static_cast<int>(bytes)) return std::nullopt;
+  }
+  return count - 1;
+}
+}  // namespace
+
 std::optional<uint16_t> Section::getPageForParagraphIndex(const uint16_t pIndex) const {
   if (const auto page = findParagraphDuringBuild(pIndex)) {
     return page;
@@ -1552,18 +1589,8 @@ std::optional<uint16_t> Section::getPageForParagraphIndex(const uint16_t pIndex)
   }
 
   const uint32_t fileSize = f.size();
-  if (!f.seek(HEADER_SIZE - sizeof(uint32_t) * 3)) {
-    return std::nullopt;
-  }
-  uint32_t paragraphLutOffset;
-  if (!serialization::tryReadPod(f, paragraphLutOffset)) {
-    return std::nullopt;
-  }
-  if (paragraphLutOffset == 0 || paragraphLutOffset >= fileSize) {
-    return std::nullopt;
-  }
-
-  if (!f.seek(paragraphLutOffset)) {
+  const auto paragraphLutOffset = readInverseLutOffset(f, HEADER_SIZE - sizeof(uint32_t) * 3, fileSize);
+  if (!paragraphLutOffset || !f.seek(*paragraphLutOffset)) {
     return std::nullopt;
   }
   uint16_t count;
@@ -1574,24 +1601,12 @@ std::optional<uint16_t> Section::getPageForParagraphIndex(const uint16_t pIndex)
     return std::nullopt;
   }
 
-  const uint32_t lutEnd = paragraphLutOffset + sizeof(uint16_t) + count * sizeof(uint16_t);
-  if (lutEnd > fileSize) {
+  const uint32_t entriesOffset = *paragraphLutOffset + sizeof(uint16_t);
+  if (count > (fileSize - entriesOffset) / sizeof(uint16_t)) {
     return std::nullopt;
   }
 
-  uint16_t resultPage = count - 1;
-  for (uint16_t i = 0; i < count; i++) {
-    uint16_t pagePIdx;
-    if (!serialization::tryReadPod(f, pagePIdx)) {
-      return std::nullopt;
-    }
-    if (pagePIdx >= pIndex) {
-      resultPage = i;
-      break;
-    }
-  }
-
-  return resultPage;
+  return findPageInIndexLut(f, count, pIndex);
 }
 
 std::optional<uint16_t> Section::findParagraphDuringBuild(const uint16_t pIndex) const {
@@ -1719,30 +1734,14 @@ std::optional<uint16_t> Section::getPageForListItemIndex(const uint16_t liIndex)
   }
 
   const uint32_t fileSize = f.size();
-  if (!f.seek(HEADER_SIZE - sizeof(uint32_t) * 2)) {
-    return std::nullopt;
-  }
-  uint32_t liLutOffset;
-  if (!serialization::tryReadPod(f, liLutOffset)) {
-    return std::nullopt;
-  }
-  if (liLutOffset == 0 || liLutOffset >= fileSize) {
+  const auto liLutOffset = readInverseLutOffset(f, HEADER_SIZE - sizeof(uint32_t) * 2, fileSize);
+  if (!liLutOffset) {
     return std::nullopt;
   }
 
   // The li LUT shares count with the paragraph LUT; read count from paragraphLutOffset
-  if (!f.seek(HEADER_SIZE - sizeof(uint32_t) * 3)) {
-    return std::nullopt;
-  }
-  uint32_t paragraphLutOffset;
-  if (!serialization::tryReadPod(f, paragraphLutOffset)) {
-    return std::nullopt;
-  }
-  if (paragraphLutOffset == 0 || paragraphLutOffset >= fileSize) {
-    return std::nullopt;
-  }
-
-  if (!f.seek(paragraphLutOffset)) {
+  const auto paragraphLutOffset = readInverseLutOffset(f, HEADER_SIZE - sizeof(uint32_t) * 3, fileSize);
+  if (!paragraphLutOffset || !f.seek(*paragraphLutOffset)) {
     return std::nullopt;
   }
   uint16_t count;
@@ -1753,27 +1752,14 @@ std::optional<uint16_t> Section::getPageForListItemIndex(const uint16_t liIndex)
     return std::nullopt;
   }
 
-  const uint32_t lutEnd = liLutOffset + count * sizeof(uint16_t);
-  if (lutEnd > fileSize) {
+  if (count > (fileSize - *liLutOffset) / sizeof(uint16_t)) {
     return std::nullopt;
   }
 
-  if (!f.seek(liLutOffset)) {
+  if (!f.seek(*liLutOffset)) {
     return std::nullopt;
   }
-  uint16_t resultPage = count - 1;
-  for (uint16_t i = 0; i < count; i++) {
-    uint16_t pageLiIdx;
-    if (!serialization::tryReadPod(f, pageLiIdx)) {
-      return std::nullopt;
-    }
-    if (pageLiIdx >= liIndex) {
-      resultPage = i;
-      break;
-    }
-  }
-
-  return resultPage;
+  return findPageInIndexLut(f, count, liIndex);
 }
 
 std::optional<uint32_t> Section::getVisibleTextOffsetForPage(const uint16_t page) const {

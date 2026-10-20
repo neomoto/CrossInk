@@ -17,6 +17,17 @@ static_assert(TableFragmentCell::MAX_SERIALIZED_LINES == MAX_TABLE_LINES_PER_CEL
 static_assert(TableFragmentRow::MAX_SERIALIZED_CELLS == MAX_TABLE_CELLS_PER_ROW);
 static_assert(PageTableFragment::MAX_SERIALIZED_ROWS == MAX_TABLE_ROWS_PER_FRAGMENT);
 
+bool validateTableFragmentMetadata(const uint8_t rowCount, const uint8_t columnCount, const uint16_t width,
+                                   const uint16_t lineHeight) {
+  if (rowCount == 0 || rowCount > MAX_TABLE_ROWS_PER_FRAGMENT || columnCount == 0 ||
+      columnCount > MAX_TABLE_CELLS_PER_ROW || width < 2 || lineHeight == 0) {
+    LOG_ERR("PTB", "Deserialization failed: invalid fragment metadata (rows=%u cols=%u width=%u lineHeight=%u)",
+            rowCount, columnCount, width, lineHeight);
+    return false;
+  }
+  return true;
+}
+
 uint16_t tableSelectionForLine(const size_t elementIndex, const uint8_t logicalColumn) {
   if (elementIndex >= MAX_PAGE_ELEMENTS || logicalColumn >= MAX_TABLE_CELLS_PER_ROW) {
     return UINT16_MAX;
@@ -55,7 +66,7 @@ bool PageLine::serialize(FsFile& file) {
 std::unique_ptr<PageLine> PageLine::deserialize(FsFile& file) {
   int16_t xPos;
   int16_t yPos;
-  if (!serialization::tryReadPod(file, xPos) || !serialization::tryReadPod(file, yPos)) {
+  if (!serialization::tryReadPodGroup(file, xPos, yPos)) {
     LOG_ERR("PGE", "Deserialization failed: truncated PageLine coordinates");
     return nullptr;
   }
@@ -100,8 +111,7 @@ std::unique_ptr<PageImage> PageImage::deserialize(FsFile& file) {
   int16_t xPos;
   int16_t yPos;
   uint8_t inlineFlag;
-  if (!serialization::tryReadPod(file, xPos) || !serialization::tryReadPod(file, yPos) ||
-      !serialization::tryReadPod(file, inlineFlag) || inlineFlag > 1) {
+  if (!serialization::tryReadPodGroup(file, xPos, yPos, inlineFlag) || inlineFlag > 1) {
     LOG_ERR("PGE", "Deserialization failed: truncated PageImage coordinates");
     return nullptr;
   }
@@ -140,8 +150,7 @@ std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(FsFile& file
   int16_t yPos = 0;
   uint16_t width = 0;
   uint8_t thickness = 0;
-  if (!serialization::tryReadPod(file, xPos) || !serialization::tryReadPod(file, yPos) ||
-      !serialization::tryReadPod(file, width) || !serialization::tryReadPod(file, thickness)) {
+  if (!serialization::tryReadPodGroup(file, xPos, yPos, width, thickness)) {
     LOG_ERR("PGE", "Deserialization failed: truncated PageHorizontalRule metadata");
     return nullptr;
   }
@@ -182,8 +191,7 @@ bool TableFragmentCell::serialize(FsFile& file) const {
 
 bool TableFragmentCell::deserialize(FsFile& file, TableFragmentCell& outCell) {
   uint8_t lineCount = 0;
-  if (!serialization::tryReadPod(file, outCell.isHeader) || !serialization::tryReadPod(file, outCell.colSpan) ||
-      !serialization::tryReadPod(file, lineCount)) {
+  if (!serialization::tryReadPodGroup(file, outCell.isHeader, outCell.colSpan, lineCount)) {
     LOG_ERR("PTB", "Deserialization failed: truncated table cell metadata");
     return false;
   }
@@ -234,8 +242,7 @@ bool TableFragmentRow::serialize(FsFile& file) const {
 
 bool TableFragmentRow::deserialize(FsFile& file, TableFragmentRow& outRow) {
   uint8_t cellCount = 0;
-  if (!serialization::tryReadPod(file, outRow.height) || !serialization::tryReadPod(file, outRow.headerSeparator) ||
-      !serialization::tryReadPod(file, cellCount)) {
+  if (!serialization::tryReadPodGroup(file, outRow.height, outRow.headerSeparator, cellCount)) {
     LOG_ERR("PTB", "Deserialization failed: truncated table row metadata");
     return false;
   }
@@ -432,18 +439,12 @@ std::unique_ptr<PageTableFragment> PageTableFragment::deserialize(FsFile& file) 
   uint8_t cellPadding = 0;
   uint16_t lineHeight = 0;
   uint8_t rowCount = 0;
-  if (!serialization::tryReadPod(file, xPos) || !serialization::tryReadPod(file, yPos) ||
-      !serialization::tryReadPod(file, width) || !serialization::tryReadPod(file, columnCount) ||
-      !serialization::tryReadPod(file, cellPadding) || !serialization::tryReadPod(file, lineHeight) ||
-      !serialization::tryReadPod(file, rowCount)) {
+  if (!serialization::tryReadPodGroup(file, xPos, yPos, width, columnCount, cellPadding, lineHeight, rowCount)) {
     LOG_ERR("PTB", "Deserialization failed: truncated fragment metadata");
     return nullptr;
   }
 
-  if (rowCount == 0 || rowCount > MAX_TABLE_ROWS_PER_FRAGMENT || columnCount == 0 ||
-      columnCount > MAX_TABLE_CELLS_PER_ROW || width < 2 || lineHeight == 0) {
-    LOG_ERR("PTB", "Deserialization failed: invalid fragment metadata (rows=%u cols=%u width=%u lineHeight=%u)",
-            rowCount, columnCount, width, lineHeight);
+  if (!validateTableFragmentMetadata(rowCount, columnCount, width, lineHeight)) {
     return nullptr;
   }
 

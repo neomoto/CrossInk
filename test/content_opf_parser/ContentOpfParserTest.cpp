@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <string>
 
 #include "ContentOpfParser.h"
@@ -163,6 +164,46 @@ TEST(ContentOpfParserMetadata, NeverEntersManifestWhenMetadataElementIsMissing) 
   EXPECT_LT(parser.write(reinterpret_cast<const uint8_t*>(xml.data()), xml.size()), xml.size());
   EXPECT_EQ(Storage.writeOpens, 0);
   EXPECT_EQ(Storage.readOpens, 0);
+}
+
+TEST(ContentOpfParserMetadata, MetadataOnlyChunkBoundariesPreserveAllLibraryFieldsAndEarlyStop) {
+  const std::string xml =
+      "<package xmlns:dc=\"http://purl.org/dc/elements/1.1/\">" + std::string(1031, ' ') +
+      R"(<metadata><dc:title>Earthsea &amp; Émile</dc:title><dc:creator>Ursula K. Le Guin</dc:creator>
+      <dc:creator>Émile Zola</dc:creator><dc:language>en</dc:language>
+      <meta content="Earthsea" name="calibre:series"/><meta content="2.5" name="calibre:series_index"/>
+      <dc:subject>Fantasy &amp; Adventure</dc:subject></metadata>
+      <manifest><item id="chapter" href="chapter.xhtml"/></manifest></package>)";
+  for (const size_t chunkSize : {1u, 7u, 73u, 512u, 1024u}) {
+    SCOPED_TRACE(chunkSize);
+    ContentOpfParser parser(kMissingCachePath, kContentPath, xml.size(), nullptr, false, true);
+    ASSERT_TRUE(parser.setup());
+    bool stopped = false;
+    for (size_t offset = 0; offset < xml.size(); offset += chunkSize) {
+      const size_t length = std::min(chunkSize, xml.size() - offset);
+      if (parser.write(reinterpret_cast<const uint8_t*>(xml.data() + offset), length) != length) {
+        stopped = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(stopped);
+    EXPECT_EQ(parser.title, "Earthsea & Émile");
+    EXPECT_EQ(parser.author, "Ursula K. Le Guin, Émile Zola");
+    EXPECT_EQ(parser.language, "en");
+    EXPECT_EQ(parser.series, "Earthsea");
+    EXPECT_EQ(parser.seriesIndex, "2.5");
+    EXPECT_EQ(parser.subject, "Fantasy & Adventure");
+  }
+}
+
+TEST(ContentOpfParserMetadata, MetadataOnlyStillRejectsTruncatedAndMalformedXmlBeforeMetadataEnd) {
+  for (const std::string xml : {"<package><metadata><title>unfinished",
+                                "<package><metadata><title>wrong close</creator></metadata></package>"}) {
+    SCOPED_TRACE(xml);
+    ContentOpfParser parser(kMissingCachePath, kContentPath, xml.size(), nullptr, false, true);
+    ASSERT_TRUE(parser.setup());
+    EXPECT_LT(parser.write(reinterpret_cast<const uint8_t*>(xml.data()), xml.size()), xml.size());
+  }
 }
 
 TEST(ContentOpfParserNamespaces, RecognizesOptimizerPrefixesAndAlternateDublinCorePrefix) {

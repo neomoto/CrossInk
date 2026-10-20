@@ -13,6 +13,7 @@
 
 struct ZipHostFileData {
   std::vector<uint8_t> bytes;
+  uint32_t modified = 1;
   size_t readFaultOffset = 0;
   int readFaultResult = 0;
   bool readFaultPending = false;
@@ -26,6 +27,7 @@ class HalFile {
   explicit HalFile(std::shared_ptr<ZipHostFileData> data) : data_(std::move(data)) {}
 
   size_t size() const { return data_ ? data_->bytes.size() : 0; }
+  uint32_t modificationTime() const { return data_ ? data_->modified : 0; }
   size_t position() const { return cursor_; }
   int available() const { return data_ && cursor_ < data_->bytes.size(); }
 
@@ -76,9 +78,10 @@ class HalStorage {
   }
 
   void reset() { files_.clear(); }
-  void put(const std::string& path, std::vector<uint8_t> bytes) {
+  void put(const std::string& path, std::vector<uint8_t> bytes, const uint32_t modified = 1) {
     auto data = std::make_shared<ZipHostFileData>();
     data->bytes = std::move(bytes);
+    data->modified = modified;
     files_[path] = std::move(data);
   }
   bool openFileForRead(const char*, const std::string& path, HalFile& file) {

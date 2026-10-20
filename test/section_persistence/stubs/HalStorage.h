@@ -22,6 +22,8 @@ struct HostFileData {
   size_t reads = 0;
   size_t seeks = 0;
   size_t failAt = std::numeric_limits<size_t>::max();
+  size_t failReadAt = std::numeric_limits<size_t>::max();
+  size_t errorReadAt = std::numeric_limits<size_t>::max();
   bool failNextRead = false;
 };
 
@@ -43,9 +45,13 @@ class HalFile : public Print {
       data_->failNextRead = false;
       return 0;
     }
-    const size_t readable = std::min(length, data_->bytes.size() - std::min(cursor_, data_->bytes.size()));
+    const size_t end = std::min({data_->bytes.size(), data_->failReadAt, data_->errorReadAt});
+    const size_t readable = std::min(length, end - std::min(cursor_, end));
     if (readable > 0) std::copy_n(data_->bytes.data() + cursor_, readable, static_cast<uint8_t*>(output));
     cursor_ += readable;
+    // SdFat can copy an earlier sector and advance the cursor before a later
+    // sector fails, reporting -1 instead of the copied prefix length.
+    if (readable < length && cursor_ >= data_->errorReadAt) return -1;
     return static_cast<int>(readable);
   }
 
@@ -145,6 +151,8 @@ class HalStorage {
   }
 
   void failWritesAt(const std::string& path, size_t offset) { files_.at(path)->failAt = offset; }
+  void failReadsAt(const std::string& path, size_t offset) { files_.at(path)->failReadAt = offset; }
+  void failReadsWithErrorAt(const std::string& path, size_t offset) { files_.at(path)->errorReadAt = offset; }
   void failNextRead(const std::string& path) { files_.at(path)->failNextRead = true; }
   const std::vector<uint8_t>& bytes(const std::string& path) const { return files_.at(path)->bytes; }
   void put(const std::string& path, std::vector<uint8_t> bytes) {
