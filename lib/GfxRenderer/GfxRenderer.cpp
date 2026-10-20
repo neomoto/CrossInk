@@ -1037,6 +1037,11 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
 
   std::string visualBuffer;
   const char* textCursor = resolveVisualText(text, visualBuffer, baseDir);
+  return getPreparedTextWidth(resolvedFontId, textCursor, style);
+}
+
+int GfxRenderer::getPreparedTextWidth(const int resolvedFontId, const char* textCursor,
+                                      const EpdFontFamily::Style style) const {
   if ((style & EpdFontFamily::SMALL_CAPS) != 0) {
     return getTextAdvanceX(resolvedFontId, textCursor, style);
   }
@@ -1065,9 +1070,40 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
     return 0;
   }
 
-  int w = 0, h = 0;
-  fontIt->second.getTextDimensions(textCursor, &w, &h, style);
+  int w = 0;
+  fontIt->second.getTextDimensions(textCursor, &w, nullptr, style);
   return w;
+}
+
+bool GfxRenderer::textFitsWidth(const int fontId, const char* text, const int maxWidth,
+                                const EpdFontFamily::Style style, const BidiUtils::BidiBaseDir baseDir) const {
+#if CROSSINK_SCALABLE_FONTS
+  ScalableFontAccess access;
+#endif
+  if (text == nullptr || *text == '\0') {
+    return 0 <= maxWidth;
+  }
+
+  const int resolvedFontId = resolveTextFontId(fontId, text, style);
+  std::string visualBuffer;
+  const char* textCursor = resolveVisualText(text, visualBuffer, baseDir);
+
+  // These paths measure advances, not the union of glyph bitmap bounds.
+  if ((style & EpdFontFamily::SMALL_CAPS) != 0) {
+    return getTextAdvanceX(resolvedFontId, textCursor, style) <= maxWidth;
+  }
+  const auto sdIt = sdCardFonts_.find(resolvedFontId);
+  if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
+    return getPreparedTextWidth(resolvedFontId, textCursor, style) <= maxWidth;
+  }
+
+  const auto fontIt = fontMap.find(resolvedFontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", resolvedFontId);
+    return 0 <= maxWidth;
+  }
+
+  return fontIt->second.textFitsWidth(textCursor, maxWidth, style);
 }
 
 GfxRenderer::TextVerticalBounds GfxRenderer::getTextVerticalBounds(const int fontId, const char* text) const {
@@ -2452,8 +2488,7 @@ std::string GfxRenderer::truncatedText(const int fontId, const char* text, const
   std::string item = text;
   // U+2026 HORIZONTAL ELLIPSIS (UTF-8: 0xE2 0x80 0xA6)
   const char* ellipsis = "\xe2\x80\xa6";
-  int textWidth = getTextWidth(fontId, item.c_str(), style);
-  if (textWidth <= maxWidth) {
+  if (textFitsWidth(fontId, item.c_str(), maxWidth, style)) {
     // Text fits, return as is
     return item;
   }
@@ -2481,7 +2516,7 @@ std::string GfxRenderer::truncatedText(const int fontId, const char* text, const
   while (low < high) {
     const size_t mid = low + (high - low + 1) / 2;
     setCandidate(mid);
-    if (getTextWidth(fontId, candidate.c_str(), style) < maxWidth) {
+    if (textFitsWidth(fontId, candidate.c_str(), maxWidth - 1, style)) {
       low = mid;
     } else {
       high = mid - 1;

@@ -4,6 +4,194 @@
 
 #include <algorithm>
 
+namespace {
+
+struct GlyphMetrics {
+  int width;
+  int height;
+  uint16_t advanceX;
+  int left;
+  int top;
+};
+
+// The original codepoint has already missed. Keep aliases ahead of synthetic
+// fallbacks, and retain the resolved alias glyph rather than looking it up again.
+uint32_t normalizeMissingCodepoint(const EpdFontFamily& family, const uint32_t cp, const EpdFontFamily::Style style,
+                                   const EpdGlyph*& glyph) {
+  const uint32_t aliasCp = syntheticGlyph::aliasCodepoint(cp);
+  if (aliasCp != cp) {
+    glyph = family.findGlyphData(aliasCp, style).glyph;
+    return glyph ? aliasCp : REPLACEMENT_GLYPH;
+  }
+  if (syntheticGlyph::isSpaceFallback(cp)) return cp;
+  if (syntheticGlyph::isSolid(cp) || syntheticGlyph::isGreekFallback(cp)) return cp;
+  return REPLACEMENT_GLYPH;
+}
+
+const EpdGlyph* resolveDimensionGlyph(const EpdFontFamily& family, uint32_t& cp, const EpdFontFamily::Style style,
+                                      const bool isCombining) {
+  const EpdGlyph* glyph = family.findGlyphData(cp, style).glyph;
+  if (glyph) return glyph;
+  // Missing marks use only a real replacement glyph, anchored as the original
+  // mark; they must not acquire a synthetic replacement or become base glyphs.
+  if (isCombining) return family.findGlyphData(REPLACEMENT_GLYPH, style).glyph;
+
+  const uint32_t originalCp = cp;
+  cp = normalizeMissingCodepoint(family, cp, style, glyph);
+  if (glyph || cp == originalCp) return glyph;
+  return family.findGlyphData(cp, style).glyph;
+}
+
+bool measureSyntheticBase(const EpdFontFamily& family, const uint32_t cp, const EpdFontFamily::Style style,
+                          const bool measureVertical, GlyphMetrics& metrics) {
+  if (syntheticGlyph::isSpaceFallback(cp)) return false;
+
+  const EpdFontData* data = family.getData(style);
+  const EpdGlyph* emGlyph = family.getGlyph('M', style);
+  if (syntheticGlyph::isSolid(cp)) {
+    const uint16_t advanceX = syntheticGlyph::solidAdvanceX(data, emGlyph);
+    const int height = syntheticGlyph::solidHeight(data, cp);
+    const int width = syntheticGlyph::solidWidth(cp, advanceX, height);
+    metrics = {width, height, advanceX, syntheticGlyph::solidLeft(cp, advanceX, width),
+               measureVertical ? syntheticGlyph::solidTop(data, cp, height) : 0};
+    return true;
+  }
+  if (syntheticGlyph::isGreekFallback(cp)) {
+    const uint16_t advanceX = syntheticGlyph::greekAdvanceX(data, emGlyph, cp);
+    const int height = syntheticGlyph::greekHeight(data, cp);
+    const int width = syntheticGlyph::greekWidth(cp, advanceX, height);
+    metrics = {width, height, advanceX, syntheticGlyph::greekLeft(cp, advanceX, width),
+               measureVertical ? syntheticGlyph::greekTop(data, cp, height) : 0};
+    return true;
+  }
+  if (syntheticGlyph::isReplacementFallback(cp)) {
+    const uint16_t advanceX = syntheticGlyph::replacementAdvanceX(data, emGlyph);
+    const int height = syntheticGlyph::replacementHeight(data);
+    const int width = syntheticGlyph::replacementWidth(advanceX, height);
+    metrics = {width, height, advanceX, syntheticGlyph::replacementLeft(advanceX, width),
+               measureVertical ? syntheticGlyph::replacementTop(data, height) : 0};
+    return true;
+  }
+  return false;
+}
+
+bool measureDimensionGlyph(const EpdFontFamily& family, uint32_t& cp, const EpdFontFamily::Style style,
+                           const bool isCombining, const bool measureVertical, GlyphMetrics& metrics) {
+  if (const EpdGlyph* glyph = resolveDimensionGlyph(family, cp, style, isCombining)) {
+    // Dynamic handlers can return ring-buffer storage. Consume only the needed
+    // metrics now, before kerning (or any other callback) can reuse that storage.
+    metrics = {glyph->width, measureVertical ? glyph->height : 0, glyph->advanceX, glyph->left,
+               measureVertical ? glyph->top : 0};
+    return true;
+  }
+  if (isCombining) return false;
+  return measureSyntheticBase(family, cp, style, measureVertical, metrics);
+}
+
+struct TextCursor {
+  int x = 0;
+  int left = 0;
+  int width = 0;
+  int top = 0;
+  int32_t advanceFP = 0;
+  uint32_t previousCp = 0;
+
+  void clearBase() {
+    x += fp4::toPixel(advanceFP);
+    previousCp = 0;
+    advanceFP = 0;
+    left = 0;
+    width = 0;
+    top = 0;
+  }
+
+  void advance(const EpdFontFamily& family, const uint32_t cp, const EpdFontFamily::Style style) {
+    if (previousCp != 0) {
+      const auto kernFP = family.getKerning(previousCp, cp, style);
+      x += fp4::toPixel(advanceFP + kernFP);
+    }
+  }
+
+  void setBase(const uint32_t cp, const GlyphMetrics& metrics) {
+    left = metrics.left;
+    width = metrics.width;
+    top = metrics.top;
+    advanceFP = metrics.advanceX;
+    previousCp = cp;
+  }
+};
+
+struct TextBounds {
+  TextBounds(const bool measureVertical, const bool measureInk)
+      : measureVertical(measureVertical), measureInk(measureInk) {}
+
+  int minX = 0;
+  int minY = 0;
+  int maxX = 0;
+  int maxY = 0;
+  int inkMinY = 0;
+  int inkMaxY = 0;
+  bool hasInk = false;
+  const bool measureVertical;
+  const bool measureInk;
+
+  void includeVertical(const int bottom, const int top) {
+    minY = std::min(minY, bottom);
+    maxY = std::max(maxY, top);
+    if (!measureInk || top <= bottom) return;
+    inkMinY = hasInk ? std::min(inkMinY, bottom) : bottom;
+    inkMaxY = hasInk ? std::max(inkMaxY, top) : top;
+    hasInk = true;
+  }
+
+  void includeGlyph(const GlyphMetrics& metrics, const int x, const int y) {
+    minX = std::min(minX, x + metrics.left);
+    maxX = std::max(maxX, x + metrics.left + metrics.width);
+    if (measureVertical) includeVertical(y + metrics.top - metrics.height, y + metrics.top);
+  }
+
+  void includeMark(const uint32_t cp, const GlyphMetrics& metrics, const TextCursor& cursor) {
+    const auto anchor = combiningMark::anchorFor(cp);
+    const int raiseBy =
+        measureVertical ? combiningMark::raiseAboveBase(anchor, metrics.top, metrics.height, cursor.top) : 0;
+    const int x = combiningMark::anchorOver(anchor, cursor.x, cursor.left, cursor.width, metrics.left, metrics.width);
+    includeGlyph(metrics, x, raiseBy);
+  }
+};
+
+// The measured union can only grow after a complete, ligature-resolved glyph.
+// Compile out the limit branch for callers that need the complete dimensions.
+template <bool checkWidth>
+bool measureText(const EpdFontFamily& family, const char* string, const EpdFontFamily::Style style, TextBounds& bounds,
+                 const int maxWidth) {
+  TextCursor cursor;
+  uint32_t cp;
+  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&string)))) {
+    if (utf8IsVariationSelector(cp)) continue;
+
+    const bool isCombining = utf8IsCombiningMark(cp);
+    if (!isCombining) cp = family.applyLigatures(cp, string, style);
+
+    GlyphMetrics metrics;
+    if (!measureDimensionGlyph(family, cp, style, isCombining, bounds.measureVertical, metrics)) {
+      if (!isCombining) cursor.clearBase();
+      continue;
+    }
+
+    if (isCombining) {
+      bounds.includeMark(cp, metrics, cursor);
+    } else {
+      cursor.advance(family, cp, style);
+      bounds.includeGlyph(metrics, cursor.x, 0);
+      cursor.setBase(cp, metrics);
+    }
+    if (checkWidth && bounds.maxX - bounds.minX > maxWidth) return false;
+  }
+  return true;
+}
+
+}  // namespace
+
 const EpdFont* EpdFontFamily::getFont(const Style style) const {
   // Extract font variant bits; decoration and positioning bits do not affect font selection.
   const bool hasBold = (style & BOLD) != 0;
@@ -24,173 +212,21 @@ const EpdFont* EpdFontFamily::getFont(const Style style) const {
 
 void EpdFontFamily::getTextDimensions(const char* string, int* w, int* h, const Style style, int* inkMinY,
                                       int* inkMaxY) const {
-  int minX = 0, minY = 0, maxX = 0, maxY = 0;
-  int boundsMinY = 0, boundsMaxY = 0;
-  bool hasInk = false;
-  const auto includeVerticalBounds = [&](const int bottom, const int top) {
-    minY = std::min(minY, bottom);
-    maxY = std::max(maxY, top);
-    if ((!inkMinY && !inkMaxY) || top <= bottom) return;
-    boundsMinY = hasInk ? std::min(boundsMinY, bottom) : bottom;
-    boundsMaxY = hasInk ? std::max(boundsMaxY, top) : top;
-    hasInk = true;
-  };
+  const bool measureInk = inkMinY || inkMaxY;
+  const bool measureVertical = h || measureInk;
+  TextBounds bounds(measureVertical, measureInk);
+  measureText<false>(*this, string, style, bounds, 0);
 
-  if (*string == '\0') {
-    *w = 0;
-    *h = 0;
-    if (inkMinY) *inkMinY = 0;
-    if (inkMaxY) *inkMaxY = 0;
-    return;
-  }
+  *w = bounds.maxX - bounds.minX;
+  if (h) *h = bounds.maxY - bounds.minY;
+  if (inkMinY) *inkMinY = bounds.inkMinY;
+  if (inkMaxY) *inkMaxY = bounds.inkMaxY;
+}
 
-  int lastBaseX = 0;
-  int lastBaseLeft = 0;
-  int lastBaseWidth = 0;
-  int lastBaseTop = 0;
-  int32_t prevAdvanceFP = 0;
-  uint32_t cp;
-  uint32_t prevCp = 0;
-  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&string)))) {
-    if (utf8IsVariationSelector(cp)) continue;
-
-    const bool isCombining = utf8IsCombiningMark(cp);
-
-    if (!isCombining) {
-      cp = applyLigatures(cp, string, style);
-      cp = getFallbackCodepoint(cp, style);
-    }
-
-    const bool hasRealGlyph = findGlyphData(cp, style).glyph != nullptr;
-
-    if (!isCombining && !hasRealGlyph && syntheticGlyph::isSpaceFallback(cp)) {
-      lastBaseX += fp4::toPixel(prevAdvanceFP);
-      prevCp = 0;
-      prevAdvanceFP = 0;
-      lastBaseLeft = 0;
-      lastBaseWidth = 0;
-      lastBaseTop = 0;
-      continue;
-    }
-
-    if (!isCombining && !hasRealGlyph && syntheticGlyph::isSolid(cp)) {
-      const EpdFontData* data = getData(style);
-      const uint16_t advanceX = syntheticGlyph::solidAdvanceX(data, getGlyph('M', style));
-      const int glyphHeight = syntheticGlyph::solidHeight(data, cp);
-      const int glyphWidth = syntheticGlyph::solidWidth(cp, advanceX, glyphHeight);
-      const int glyphLeft = syntheticGlyph::solidLeft(cp, advanceX, glyphWidth);
-      const int glyphTop = syntheticGlyph::solidTop(data, cp, glyphHeight);
-
-      if (prevCp != 0) {
-        const auto kernFP = getKerning(prevCp, cp, style);
-        lastBaseX += fp4::toPixel(prevAdvanceFP + kernFP);
-      }
-
-      minX = std::min(minX, lastBaseX + glyphLeft);
-      maxX = std::max(maxX, lastBaseX + glyphLeft + glyphWidth);
-      includeVerticalBounds(glyphTop - glyphHeight, glyphTop);
-
-      lastBaseLeft = glyphLeft;
-      lastBaseWidth = glyphWidth;
-      lastBaseTop = glyphTop;
-      prevAdvanceFP = advanceX;
-      prevCp = cp;
-      continue;
-    }
-
-    if (!isCombining && !hasRealGlyph && syntheticGlyph::isGreekFallback(cp)) {
-      const EpdFontData* data = getData(style);
-      const uint16_t advanceX = syntheticGlyph::greekAdvanceX(data, getGlyph('M', style), cp);
-      const int glyphHeight = syntheticGlyph::greekHeight(data, cp);
-      const int glyphWidth = syntheticGlyph::greekWidth(cp, advanceX, glyphHeight);
-      const int glyphLeft = syntheticGlyph::greekLeft(cp, advanceX, glyphWidth);
-      const int glyphTop = syntheticGlyph::greekTop(data, cp, glyphHeight);
-
-      if (prevCp != 0) {
-        const auto kernFP = getKerning(prevCp, cp, style);
-        lastBaseX += fp4::toPixel(prevAdvanceFP + kernFP);
-      }
-
-      minX = std::min(minX, lastBaseX + glyphLeft);
-      maxX = std::max(maxX, lastBaseX + glyphLeft + glyphWidth);
-      includeVerticalBounds(glyphTop - glyphHeight, glyphTop);
-
-      lastBaseLeft = glyphLeft;
-      lastBaseWidth = glyphWidth;
-      lastBaseTop = glyphTop;
-      prevAdvanceFP = advanceX;
-      prevCp = cp;
-      continue;
-    }
-
-    if (!isCombining && !hasRealGlyph && syntheticGlyph::isReplacementFallback(cp)) {
-      const EpdFontData* data = getData(style);
-      const uint16_t advanceX = syntheticGlyph::replacementAdvanceX(data, getGlyph('M', style));
-      const int glyphHeight = syntheticGlyph::replacementHeight(data);
-      const int glyphWidth = syntheticGlyph::replacementWidth(advanceX, glyphHeight);
-      const int glyphLeft = syntheticGlyph::replacementLeft(advanceX, glyphWidth);
-      const int glyphTop = syntheticGlyph::replacementTop(data, glyphHeight);
-
-      if (prevCp != 0) {
-        const auto kernFP = getKerning(prevCp, cp, style);
-        lastBaseX += fp4::toPixel(prevAdvanceFP + kernFP);
-      }
-
-      minX = std::min(minX, lastBaseX + glyphLeft);
-      maxX = std::max(maxX, lastBaseX + glyphLeft + glyphWidth);
-      includeVerticalBounds(glyphTop - glyphHeight, glyphTop);
-
-      lastBaseLeft = glyphLeft;
-      lastBaseWidth = glyphWidth;
-      lastBaseTop = glyphTop;
-      prevAdvanceFP = advanceX;
-      prevCp = cp;
-      continue;
-    }
-
-    const EpdGlyph* glyph = getGlyph(cp, style);
-    if (!glyph) {
-      if (!isCombining) {
-        lastBaseX += fp4::toPixel(prevAdvanceFP);
-        prevCp = 0;
-        prevAdvanceFP = 0;
-        lastBaseLeft = 0;
-        lastBaseWidth = 0;
-        lastBaseTop = 0;
-      }
-      continue;
-    }
-
-    const auto anchor = combiningMark::anchorFor(cp);
-    const int raiseBy = isCombining ? combiningMark::raiseAboveBase(anchor, glyph->top, glyph->height, lastBaseTop) : 0;
-
-    if (!isCombining && prevCp != 0) {
-      const auto kernFP = getKerning(prevCp, cp, style);
-      lastBaseX += fp4::toPixel(prevAdvanceFP + kernFP);
-    }
-
-    const int glyphBaseX = isCombining ? combiningMark::anchorOver(anchor, lastBaseX, lastBaseLeft, lastBaseWidth,
-                                                                   glyph->left, glyph->width)
-                                       : lastBaseX;
-    const int glyphBaseY = raiseBy;
-
-    minX = std::min(minX, glyphBaseX + glyph->left);
-    maxX = std::max(maxX, glyphBaseX + glyph->left + glyph->width);
-    includeVerticalBounds(glyphBaseY + glyph->top - glyph->height, glyphBaseY + glyph->top);
-
-    if (!isCombining) {
-      lastBaseLeft = glyph->left;
-      lastBaseWidth = glyph->width;
-      lastBaseTop = glyph->top;
-      prevAdvanceFP = glyph->advanceX;
-      prevCp = cp;
-    }
-  }
-
-  *w = maxX - minX;
-  *h = maxY - minY;
-  if (inkMinY) *inkMinY = boundsMinY;
-  if (inkMaxY) *inkMaxY = boundsMaxY;
+bool EpdFontFamily::textFitsWidth(const char* string, const int maxWidth, const Style style) const {
+  if (maxWidth < 0) return false;
+  TextBounds bounds(false, false);
+  return measureText<true>(*this, string, style, bounds, maxWidth);
 }
 
 const EpdFontData* EpdFontFamily::getData(const Style style) const { return getFont(style)->data; }
@@ -231,14 +267,8 @@ const EpdGlyph* EpdFontFamily::getGlyph(const uint32_t cp, const Style style) co
 }
 
 uint32_t EpdFontFamily::getFallbackCodepoint(const uint32_t cp, const Style style) const {
-  if (findGlyphData(cp, style).glyph) return cp;
-  const uint32_t aliasCp = syntheticGlyph::aliasCodepoint(cp);
-  if (aliasCp != cp) {
-    return findGlyphData(aliasCp, style).glyph ? aliasCp : REPLACEMENT_GLYPH;
-  }
-  if (syntheticGlyph::isSpaceFallback(cp)) return cp;
-  if (syntheticGlyph::isSolid(cp) || syntheticGlyph::isGreekFallback(cp)) return cp;
-  return REPLACEMENT_GLYPH;
+  const EpdGlyph* glyph = findGlyphData(cp, style).glyph;
+  return glyph ? cp : normalizeMissingCodepoint(*this, cp, style, glyph);
 }
 
 bool EpdFontFamily::hasCodepoint(const uint32_t cp, const Style style) const {

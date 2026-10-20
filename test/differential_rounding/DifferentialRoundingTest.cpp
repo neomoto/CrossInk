@@ -117,6 +117,82 @@ static int textHeight(const char* str) {
   return h;
 }
 
+struct ExpectedFamilyMetrics {
+  int width;
+  int height;
+  int inkMinY;
+  int inkMaxY;
+};
+
+static bool checkWidthFitParity(const EpdFontFamily& family, const char* text, const EpdFontFamily::Style style,
+                                const int measuredWidth) {
+  const int limits[] = {-1, 0, measuredWidth - 1, measuredWidth, measuredWidth + 1};
+  for (const int limit : limits) {
+    if (family.textFitsWidth(text, limit, style) != (measuredWidth <= limit)) {
+      fprintf(stderr, "  Width-fit mismatch for \"%s\": measured width %d, limit %d\n", text, measuredWidth, limit);
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool checkWidthOnlyMetrics(const EpdFontFamily& family, const char* text, const EpdFontFamily::Style style,
+                                  const ExpectedFamilyMetrics& expected) {
+  int width = -1;
+  family.getTextDimensions(text, &width, nullptr, style);
+  if (width != expected.width) {
+    fprintf(stderr, "  Width-only mismatch for \"%s\": %d, expected %d\n", text, width, expected.width);
+    return false;
+  }
+
+  int minY = 0, maxY = 0;
+  family.getTextDimensions(text, &width, nullptr, style, &minY, &maxY);
+  if (width != expected.width || minY != expected.inkMinY || maxY != expected.inkMaxY) {
+    fprintf(stderr, "  Width/ink mismatch for \"%s\": %d [%d,%d], expected %d [%d,%d]\n", text, width, minY, maxY,
+            expected.width, expected.inkMinY, expected.inkMaxY);
+    return false;
+  }
+  family.getTextDimensions(text, &width, nullptr, style, &minY);
+  if (width != expected.width || minY != expected.inkMinY) {
+    fprintf(stderr, "  Width/min-ink mismatch for \"%s\"\n", text);
+    return false;
+  }
+  family.getTextDimensions(text, &width, nullptr, style, nullptr, &maxY);
+  if (width != expected.width || maxY != expected.inkMaxY) {
+    fprintf(stderr, "  Width/max-ink mismatch for \"%s\"\n", text);
+    return false;
+  }
+  return true;
+}
+
+static bool checkFamilyMetrics(const EpdFontFamily& family, const char* text, const ExpectedFamilyMetrics& expected,
+                               const EpdFontFamily::Style style = EpdFontFamily::REGULAR) {
+  int width = 0, height = 0, minY = 0, maxY = 0;
+  family.getTextDimensions(text, &width, &height, style, &minY, &maxY);
+  if (width != expected.width || height != expected.height || minY != expected.inkMinY || maxY != expected.inkMaxY) {
+    fprintf(stderr, "  Family metrics mismatch for \"%s\": %d x %d [%d,%d], expected %d x %d [%d,%d]\n", text, width,
+            height, minY, maxY, expected.width, expected.height, expected.inkMinY, expected.inkMaxY);
+    return false;
+  }
+  family.getTextDimensions(text, &width, &height, style);
+  if (width != expected.width || height != expected.height) {
+    fprintf(stderr, "  Family dimensions without ink mismatch for \"%s\"\n", text);
+    return false;
+  }
+  return checkWidthOnlyMetrics(family, text, style, expected) && checkWidthFitParity(family, text, style, width);
+}
+
+static EpdFontData makeMetricsFontData(const EpdGlyph* glyphs, const EpdUnicodeInterval* intervals,
+                                       const uint32_t intervalCount) {
+  EpdFontData data = kTestFontData;
+  data.glyph = glyphs;
+  data.intervals = intervals;
+  data.intervalCount = intervalCount;
+  data.kernMatrix = nullptr;
+  data.kernRowOffsets = nullptr;
+  return data;
+}
+
 // ============================================================================
 // Part 1: Pure fp4 math tests
 // ============================================================================
@@ -505,6 +581,219 @@ void testFamilyInkBounds() {
   PASS();
 }
 
+void testFamilyStyleAndSharedFallbackMetrics() {
+  printf("testFamilyStyleAndSharedFallbackMetrics...\n");
+  static const EpdGlyph regularGlyphs[] = {{6, 7, 120, -2, 9, 0, 0}, {5, 9, 137, 1, 6, 0, 0}, {4, 5, 88, 0, 7, 0, 0}};
+  static const EpdUnicodeInterval regularIntervals[] = {{'A', 'A', 0}, {'B', 'B', 1}, {'D', 'D', 2}};
+  static const EpdGlyph boldGlyphs[] = {{9, 10, 152, 1, 12, 0, 0}, {7, 4, 104, -1, 3, 0, 0}};
+  static const EpdUnicodeInterval boldIntervals[] = {{'A', 'A', 0}, {'C', 'C', 1}};
+  static const EpdGlyph fallbackGlyphs[] = {
+      {20, 20, 320, 0, 20, 0, 0}, {3, 6, 80, 2, 5, 0, 0}, {11, 12, 192, 0, 12, 0, 0}, {8, 6, 144, -1, 4, 0, 0}};
+  static const EpdUnicodeInterval fallbackIntervals[] = {{'B', 'B', 0}, {'C', 'C', 1}, {'D', 'D', 2}, {'E', 'E', 3}};
+  EpdFontData regularData = makeMetricsFontData(regularGlyphs, regularIntervals, 3);
+  EpdFontData boldData = makeMetricsFontData(boldGlyphs, boldIntervals, 2);
+  EpdFontData fallbackData = makeMetricsFontData(fallbackGlyphs, fallbackIntervals, 4);
+  EpdFont regular(&regularData), bold(&boldData), fallback(&fallbackData);
+  EpdFontFamily family(&regular, &bold, nullptr, nullptr, &fallback);
+  const auto decoratedBoldItalic =
+      static_cast<EpdFontFamily::Style>(EpdFontFamily::BOLD_ITALIC | EpdFontFamily::UNDERLINE);
+
+  // Missing bold-italic selects bold; its missing B/D use regular, then E uses
+  // the shared fallback. The fallback's deliberately larger B/D must not win.
+  ASSERT_TRUE(checkFamilyMetrics(family, "ABCDE", {39, 15, -3, 12}, decoratedBoldItalic));
+  ASSERT_TRUE(checkFamilyMetrics(family, "ABCDE", {37, 12, -3, 9}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "ABCDE", {37, 12, -3, 9}, EpdFontFamily::ITALIC));
+  EpdFontFamily italicOnly(&regular, nullptr, &bold, nullptr, &fallback);
+  ASSERT_TRUE(checkFamilyMetrics(italicOnly, "ABCDE", {39, 15, -3, 12}, EpdFontFamily::BOLD_ITALIC));
+  PASS();
+}
+
+void testFamilyAliasAndLigatureMetrics() {
+  printf("testFamilyAliasAndLigatureMetrics...\n");
+  static const EpdGlyph glyphs[] = {{12, 12, 200, 0, 12, 0, 0}, {8, 8, 145, 0, 8, 0, 0}, {3, 4, 64, -1, 10, 0, 0},
+                                    {10, 11, 176, 0, 10, 0, 0}, {5, 7, 112, 1, 6, 0, 0}, {20, 10, 320, 0, 10, 0, 0}};
+  static const EpdUnicodeInterval intervals[] = {{'M', 'M', 0},       {'f', 'f', 5},       {'o', 'o', 1},
+                                                 {0x2018, 0x2018, 2}, {0xFB01, 0xFB01, 3}, {0xFFFD, 0xFFFD, 4}};
+  static const EpdLigaturePair ligatures[] = {{('f' << 16) | 'i', 0xFB01}};
+  static const EpdKernClassEntry kernLeft[] = {{'o', 1}, {0x2018, 2}};
+  static const EpdKernClassEntry kernRight[] = {{'o', 2}, {0x2018, 1}};
+  static const int8_t kernMatrix[] = {-8, 0, 0, -9};
+  EpdFontData data = makeMetricsFontData(glyphs, intervals, 6);
+  data.ligaturePairs = ligatures;
+  data.ligaturePairCount = 1;
+  data.kernLeftClasses = kernLeft;
+  data.kernRightClasses = kernRight;
+  data.kernLeftEntryCount = 2;
+  data.kernRightEntryCount = 2;
+  data.kernLeftClassCount = 2;
+  data.kernRightClassCount = 2;
+  data.kernMatrix = kernMatrix;
+  EpdFont font(&data);
+  EpdFontFamily family(&font);
+
+  // Ligatures must run before missing-character replacement. The alias must
+  // carry U+2018 into kerning, not the original U+02BB or U+FFFD.
+  ASSERT_TRUE(checkFamilyMetrics(family, "fi", {10, 11, -1, 10}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "f", {20, 10, 0, 10}));
+  ASSERT_TRUE(checkFamilyMetrics(family,
+                                 "o\xCA\xBB"
+                                 "o",
+                                 {20, 10, 0, 10}));
+  ASSERT_TRUE(checkFamilyMetrics(family,
+                                 "o\xE2\x80\x98"
+                                 "o",
+                                 {20, 10, 0, 10}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "Z", {6, 7, -1, 6}));
+  PASS();
+}
+
+void testFamilySyntheticGeometryMetrics() {
+  printf("testFamilySyntheticGeometryMetrics...\n");
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "\xE2\x96\x88", {9, 12, 0, 12}));  // full block
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "\xE2\x96\xA0", {8, 10, 2, 10}));  // black square
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "\xCE\x93", {7, 12, 0, 12}));      // gamma
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "\xCE\xB5", {9, 10, 1, 10}));      // epsilon
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "\xCF\x89", {9, 10, 1, 10}));      // omega
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily,
+                                 "o\xE2\x96\x88"
+                                 "o",
+                                 {26, 12, 0, 12}));
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "Z", {9, 12, 0, 12}));
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "\xCA\xBB", {9, 12, 0, 12}));  // missing alias and replacement
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "\xE2\x80\x83", {0, 0, 0, 0}));
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily,
+                                 "o\xE2\x80\x83"
+                                 "o",
+                                 {17, 8, 0, 8}));
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "xoo", {26, 8, 0, 8}));
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, "", {0, 0, 0, 0}));
+  ASSERT_TRUE(checkFamilyMetrics(testFontFamily, " ", {0, 0, 0, 0}));
+  PASS();
+}
+
+void testFamilyRealGlyphsPrecedeSyntheticMetrics() {
+  printf("testFamilyRealGlyphsPrecedeSyntheticMetrics...\n");
+  static const EpdGlyph glyphs[] = {{11, 12, 200, 0, 12, 0, 0}, {2, 3, 48, 0, 3, 0, 0},  {4, 5, 80, 1, 4, 0, 0},
+                                    {4, 0, 80, 2, 0, 0, 0},     {6, 5, 96, -1, 7, 0, 0}, {3, 4, 64, -1, 3, 0, 0},
+                                    {5, 6, 96, 0, 5, 0, 0}};
+  static const EpdUnicodeInterval intervals[] = {{'M', 'M', 0},       {0x02BB, 0x02BB, 1}, {0x0393, 0x0393, 2},
+                                                 {0x2003, 0x2003, 3}, {0x2018, 0x2018, 4}, {0x2588, 0x2588, 5},
+                                                 {0xFFFD, 0xFFFD, 6}};
+  EpdFontData data = makeMetricsFontData(glyphs, intervals, 7);
+  EpdFont font(&data);
+  EpdFontFamily family(&font);
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xCA\xBB", {2, 3, 0, 3}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xCE\x93", {5, 5, -1, 4}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xE2\x80\x83", {6, 0, 0, 0}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xE2\x96\x88", {3, 4, -1, 3}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "Z", {5, 6, -1, 5}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xCF\x89", {13, 10, 1, 10}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xE2\x96\xA0", {10, 10, 2, 10}));
+
+  // Without M, the real replacement glyph supplies synthetic em advance.
+  data.intervals = intervals + 1;
+  data.intervalCount = 6;
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xCF\x89", {6, 10, 1, 10}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xE2\x96\xA0", {6, 10, 2, 10}));
+  PASS();
+}
+
+void testFamilyCombiningAndVariationMetrics() {
+  printf("testFamilyCombiningAndVariationMetrics...\n");
+  static const EpdGlyph glyphs[] = {
+      {7, 6, 130, 0, 8, 0, 0}, {7, 11, 130, 0, 8, 0, 0}, {3, 3, 0, 0, 10, 0, 0}, {9, 4, 300, -2, 5, 0, 0}};
+  static const EpdUnicodeInterval intervals[] = {
+      {'a', 'a', 0}, {'g', 'g', 1}, {0x0301, 0x0301, 2}, {0xFFFD, 0xFFFD, 3}};
+  EpdFontData data = makeMetricsFontData(glyphs, intervals, 3);
+  EpdFont font(&data);
+  EpdFontFamily family(&font);
+  ASSERT_TRUE(checkFamilyMetrics(family, "a\xCC\x81", {7, 12, 2, 12}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "a\xEF\xB8\x8F\xCC\x81\xF3\xA0\x84\x80", {7, 12, 2, 12}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xEF\xB8\x8F\xF3\xA0\x84\x80", {0, 0, 0, 0}));
+  ASSERT_TRUE(checkFamilyMetrics(family, "\xCC\x81", {3, 10, 7, 10}));
+  ASSERT_TRUE(checkFamilyMetrics(family,
+                                 "a\xCC\x88"
+                                 "g",
+                                 {15, 11, -3, 8}));  // no real replacement: skip mark
+
+  data.intervalCount = 4;
+  // A missing mark uses the replacement's ink, but keeps its original anchor
+  // and the base's pending advance. It must never become an advancing glyph.
+  ASSERT_TRUE(checkFamilyMetrics(family,
+                                 "a\xCC\x88"
+                                 "a",
+                                 {16, 13, 2, 13}));
+  PASS();
+}
+
+#if CROSSINK_SCALABLE_FONTS
+struct ScratchGlyphContext {
+  EpdGlyph glyph{};
+};
+
+static const EpdGlyph* scratchGlyph(void* context, const uint32_t cp) {
+  auto& glyph = static_cast<ScratchGlyphContext*>(context)->glyph;
+  switch (cp) {
+    case 'a':
+      glyph = {6, 5, 136, -1, 7, 0, 0};
+      break;
+    case 'b':
+      glyph = {9, 8, 152, 2, 6, 0, 0};
+      break;
+    case 0x2018:
+      glyph = {3, 4, 64, -1, 10, 0, 0};
+      break;
+    case REPLACEMENT_GLYPH:
+      glyph = {4, 6, 104, 1, 4, 0, 0};
+      break;
+    default:
+      glyph = {31, 29, 496, -7, 25, 0, 0};
+      return nullptr;
+  }
+  return &glyph;
+}
+
+static const EpdGlyph* scratchMissGlyph(void* context, const uint32_t) {
+  auto& glyph = static_cast<ScratchGlyphContext*>(context)->glyph;
+  glyph = {40, 40, 640, -10, 30, 0, 0};
+  return &glyph;
+}
+
+static int8_t scratchKerning(void* context, const uint32_t left, const uint32_t right) {
+  // A callback is permitted to reuse shared metric storage. The measurement
+  // must have consumed the glyph fields before this overwrites them.
+  scratchMissGlyph(context, 'M');
+  if (left == 'a' && right == 'b') return -8;
+  if (left == 'b' && right == 'a') return -9;
+  return 0;
+}
+
+void testFamilyDynamicGlyphMetricLifetime() {
+  printf("testFamilyDynamicGlyphMetricLifetime...\n");
+  ScratchGlyphContext context;
+  EpdFontData data = makeMetricsFontData(nullptr, nullptr, 0);
+  data.glyphMissCtx = &context;
+  data.dynamicGlyphHandler = scratchGlyph;
+  data.glyphMissHandler = scratchMissGlyph;
+  data.kerningHandler = scratchKerning;
+  EpdFont font(&data);
+  EpdFontFamily family(&font);
+  ASSERT_TRUE(checkFamilyMetrics(family, "aba", {23, 9, -2, 7}));
+  ASSERT_TRUE(checkFamilyMetrics(family,
+                                 "a\xCA\xBB"
+                                 "b",
+                                 {25, 12, -2, 10}));
+  // EpdFontFamily deliberately does not invoke glyphMissHandler on a miss.
+  // Its real replacement must win over that handler's very different metrics.
+  ASSERT_TRUE(checkFamilyMetrics(family, "Z", {5, 6, -2, 4}));
+  ASSERT_TRUE(checkFamilyMetrics(family,
+                                 "a\xCC\x88"
+                                 "b",
+                                 {20, 9, -2, 7}));
+  PASS();
+}
+#endif
+
 void testHeightCalculation() {
   printf("testHeightCalculation...\n");
 
@@ -539,6 +828,14 @@ int main() {
   testFamilyMissingGlyphUsesReplacementFallback();
   testFamilySpaceGlyphsStayBlank();
   testFamilyInkBounds();
+  testFamilyStyleAndSharedFallbackMetrics();
+  testFamilyAliasAndLigatureMetrics();
+  testFamilySyntheticGeometryMetrics();
+  testFamilyRealGlyphsPrecedeSyntheticMetrics();
+  testFamilyCombiningAndVariationMetrics();
+#if CROSSINK_SCALABLE_FONTS
+  testFamilyDynamicGlyphMetricLifetime();
+#endif
   testHeightCalculation();
 
   printf("\n=== Results: %d passed, %d failed ===\n", testsPassed, testsFailed);

@@ -101,6 +101,82 @@ All 985 native tests passed. A separate AddressSanitizer/UndefinedBehaviorSaniti
 build passed 87 text-layout, section/progress-persistence, and library-builder tests,
 including short writes, truncated records, cancellation, and retained old caches.
 
+### UI rendering optimization
+
+The next pass compares the optimized `cbc3a061` baseline with glyph-resolution,
+width-only measurement, bounded text-fit, and checked kerning-search changes.
+Instruments profiles separate the activity render thread from main-thread SDL
+presentation. The same 80-step long-metadata Library scroll window produced:
+
+| Sampled CPU in the scrolling window | Before | After |
+| --- | ---: | ---: |
+| Activity render thread | 378 ms | 214 ms |
+| Kerning, inclusive | 130 ms | 70 ms |
+| Text truncation, inclusive | 91 ms | 34 ms |
+
+Inclusive function times overlap; do not add them. The render thread also contains
+the simulator's synchronous framebuffer conversion. Neither it nor main-thread
+SDL presentation is a measured ESP32-C3/e-ink response time.
+
+Normal, unprofiled application runs replayed Home, Library scrolling and sorting,
+Settings, and reader-drawer navigation. Each case used three alternating
+before/after pairs with identical public books, settings, and common warm caches.
+Medians are the median of per-run navigation-frame medians; p95 uses the pooled
+navigation frames. All times below measure activity-render calls, in milliseconds.
+
+| UI workload | Before median | After median | Before p95 | After p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Minimal Library, 1,000 short filename titles | 0.643 | 0.585 | 1.111 | 1.386 |
+| Lyra expanded Library, 100 long-metadata titles | 3.942 | 2.431 | 8.074 | 4.938 |
+| Settings tabs | 0.581 | 0.533 | 1.326 | 1.242 |
+| Settings rows | 0.597 | 0.607 | 1.189 | 1.168 |
+| Reader drawer | 0.681 | 0.620 | 1.499 | 1.358 |
+| Home with recent-book card | 0.744 | 0.579 | 1.189 | 1.251 |
+| Library sort picker and sorted view | 3.136 | 2.138 | 4.688 | 4.119 |
+| Arabic Settings, large UI | 0.751 | 0.655 | 1.302 | 1.261 |
+
+The long-metadata fixtures use public `font-prewarm-benchmark.epub` content under
+distinct filenames, with synthetic long titles, authors, series, and genre.
+Library settings are title sort ascending, metadata on, expanded rows, and
+series/genre shown; the short-filename case uses Minimal with metadata off.
+Other screens use Lyra. The Arabic case sets `language: "AR"` and `uiScale: 2`.
+Navigation replays include actual button events, not direct activity injection.
+
+The long Library median improves by 1.62×; smaller views remain sub-millisecond
+and noisy. Some p95 values increased, so these measurements do not establish a
+general tail-latency improvement. No polling-delay, display-waveform, input,
+appearance, persistent-cache, bootloader, partition, or OTA changes were made.
+
+All 48 application runs passed their intended-activity checks; 72 corresponding
+screenshots and all persisted cache/settings/progress bytes matched exactly.
+All 1,001 native CTest entries passed. The standalone rounding runner executes
+its 21 regression groups once rather than being misregistered as GoogleTest
+output. Forty kerning-map cases, that runner, and the real scalable-font adapter
+also passed AddressSanitizer/UndefinedBehaviorSanitizer checks.
+The complete reader auto-rotation replay also passed; all 43 corresponding
+grayscale captures matched the pre-UI baseline exactly.
+
+The ESP32-C3 candidate is 6,318,928 bytes, with 234,672 bytes of partition
+headroom. Static RAM remains 64,832 bytes. No device was accessed or flashed;
+physical X3 UI latency and peak heap remain unmeasured.
+
+#### Complexity report
+
+Manual cyclomatic counts include runtime decisions, ternaries, and Boolean
+operators; preprocessor branches and compile-time assertions are excluded.
+
+| Function | Before | After |
+| --- | ---: | ---: |
+| `EpdFontFamily::getTextDimensions` | 31 | 6 |
+| `EpdFontFamily::getFallbackCodepoint` | 7 | 2 |
+| `GfxRenderer::getTextWidth` | 10 | 3 |
+| Split / packed kerning lookup helpers | 7 / 6 | 10 / 9 |
+
+Extracted helpers separate codepoint normalization, scalar glyph snapshots,
+cursor/bounds accumulation, prepared-width dispatch, and bounded fitting.
+New measurement helpers have counts at most 9. Truncation's outer routine stays
+at 8, with its unchanged UTF-8 candidate lambda at 5.
+
 ## Flash and monitor
 
 Flash firmware:

@@ -90,7 +90,15 @@ static uint8_t lookupKernClassSplit(const uint16_t* codepoints, const uint8_t* c
     return 0;
   }
   const auto target = static_cast<uint16_t>(cp);
+  if (target < codepoints[0]) return 0;
   const uint16_t* end = codepoints + count;
+  // Unique integer keys put the target within this prefix. Check its last key
+  // before shortening the search so legacy maps with duplicates keep the same
+  // first-match lower_bound result. Keep the span wide enough for U+FFFF.
+  const uint32_t prefixCount = cp - codepoints[0] + 1;
+  if (prefixCount < count && codepoints[prefixCount - 1] >= target) {
+    end = codepoints + prefixCount;
+  }
   const auto it = std::lower_bound(codepoints, end, target);
   return (it != end && *it == target) ? classIds[it - codepoints] : 0;
 }
@@ -101,7 +109,13 @@ static uint8_t lookupKernClass(const EpdKernClassEntry* entries, const uint16_t 
   }
 
   const auto target = static_cast<uint16_t>(cp);
+  if (target < entries[0].codepoint) return 0;
   const auto* end = entries + count;
+  // As in the split map, narrow only when the prefix still contains lower_bound.
+  const uint32_t prefixCount = cp - entries[0].codepoint + 1;
+  if (prefixCount < count && entries[prefixCount - 1].codepoint >= target) {
+    end = entries + prefixCount;
+  }
 
   // lower_bound: exact-key lookup. Finds the first entry with codepoint >= target,
   // then the equality check confirms an exact match exists.

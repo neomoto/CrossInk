@@ -16,6 +16,10 @@
   every 32 work units, retaining cancellation and cooperative task servicing.
 - Batch adjacent EPUB cache metadata into checked, bounded stack-buffer writes.
   Serialized bytes, cache versions, and reading-position formats are unchanged.
+- Reduce UI text-layout CPU work by reusing resolved glyph metrics, skipping
+  discarded height calculations, narrowing checked kerning searches, and stopping
+  text-fit probes after their measured bounds overflow. Preserve font fallback,
+  truncation, wrapping, and visible geometry without adding persistent caches.
 
 ### Fixed
 

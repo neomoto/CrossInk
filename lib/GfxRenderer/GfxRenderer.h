@@ -122,6 +122,10 @@ class GfxRenderer {
   // fontId unchanged. The whole string is routed as a unit so each draw/measure
   // call stays single-font (consistent bit depth, metrics, wrapping).
   int resolveTextFontId(int fontId, const char* text, EpdFontFamily::Style style) const;
+  // Font fallback and bidi preparation have already been applied to text.
+  int getPreparedTextWidth(int resolvedFontId, const char* text, EpdFontFamily::Style style) const;
+  bool textFitsWidth(int fontId, const char* text, int maxWidth, EpdFontFamily::Style style,
+                     BidiUtils::BidiBaseDir baseDir = BidiUtils::BidiBaseDir::AUTO) const;
   void renderChar(const EpdFontFamily& fontFamily, uint32_t cp, int* x, int* y, bool pixelState,
                   EpdFontFamily::Style style) const;
   void freeBwBufferChunks();

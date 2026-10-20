@@ -27,8 +27,11 @@ class EpdFontFamily {
       : regular(regular), bold(bold), italic(italic), boldItalic(boldItalic), fallback(fallback) {}
   ~EpdFontFamily() = default;
   // Optional ink bounds use font coordinates, increasing upward from the baseline.
+  // h may be nullptr for width-only measurement; w is required.
   void getTextDimensions(const char* string, int* w, int* h, Style style = REGULAR, int* inkMinY = nullptr,
                          int* inkMaxY = nullptr) const;
+  // Tests the same horizontal bounds, stopping once their union exceeds maxWidth.
+  bool textFitsWidth(const char* string, int maxWidth, Style style = REGULAR) const;
   const EpdFontData* getData(Style style = REGULAR) const;
   GlyphData findGlyphData(uint32_t cp, Style style = REGULAR) const;
   GlyphData getGlyphData(uint32_t cp, Style style = REGULAR) const;
