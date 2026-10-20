@@ -38,6 +38,10 @@ class GfxRenderer {
   void drawText(Args...) const {}
   template <class... Args>
   void fillRect(Args...) const {}
+  template <class... Args>
+  void drawRect(Args...) const {}
+  void beginTextClip(int, int, int, int) const {}
+  void endTextClip() const {}
   bool isSdCardFont(int) const { return false; }
   bool releaseSdCardFontForLowMemory(int, bool = false) { return false; }
   bool ensureSdCardFontReady(int, const uint32_t*, size_t, bool, bool, uint8_t) const { return true; }

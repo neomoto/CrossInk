@@ -43,7 +43,7 @@ void PageLine::render(GfxRenderer& renderer, const int fontId, const int xOffset
 }
 
 bool PageLine::serialize(FsFile& file) {
-  if (!serialization::tryWritePod(file, xPos) || !serialization::tryWritePod(file, yPos)) {
+  if (!serialization::tryWritePodGroup(file, xPos, yPos)) {
     LOG_ERR("PGE", "Serialization failed: could not write PageLine coordinates");
     return false;
   }
@@ -87,8 +87,7 @@ void PageImage::renderPlaceholder(GfxRenderer& renderer, const int xOffset, cons
 }
 
 bool PageImage::serialize(FsFile& file) {
-  if (!serialization::tryWritePod(file, xPos) || !serialization::tryWritePod(file, yPos) ||
-      !serialization::tryWritePod(file, static_cast<uint8_t>(inlineImage))) {
+  if (!serialization::tryWritePodGroup(file, xPos, yPos, static_cast<uint8_t>(inlineImage))) {
     LOG_ERR("PGE", "Serialization failed: could not write PageImage coordinates");
     return false;
   }
@@ -133,8 +132,7 @@ void PageHorizontalRule::render(GfxRenderer& renderer, const int fontId, const i
 }
 
 bool PageHorizontalRule::serialize(FsFile& file) {
-  return serialization::tryWritePod(file, xPos) && serialization::tryWritePod(file, yPos) &&
-         serialization::tryWritePod(file, width) && serialization::tryWritePod(file, thickness);
+  return serialization::tryWritePodGroup(file, xPos, yPos, width, thickness);
 }
 
 std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(FsFile& file) {
@@ -169,8 +167,7 @@ bool TableFragmentCell::serialize(FsFile& file) const {
     return false;
   }
 
-  if (!serialization::tryWritePod(file, isHeader) || !serialization::tryWritePod(file, colSpan) ||
-      !serialization::tryWritePod(file, static_cast<uint8_t>(lines.size()))) {
+  if (!serialization::tryWritePodGroup(file, isHeader, colSpan, static_cast<uint8_t>(lines.size()))) {
     LOG_ERR("PTB", "Serialization failed: could not write table cell header");
     return false;
   }
@@ -223,8 +220,7 @@ bool TableFragmentRow::serialize(FsFile& file) const {
     logicalColumns = static_cast<uint8_t>(logicalColumns + cell.colSpan);
   }
 
-  if (!serialization::tryWritePod(file, height) || !serialization::tryWritePod(file, headerSeparator) ||
-      !serialization::tryWritePod(file, static_cast<uint8_t>(cells.size()))) {
+  if (!serialization::tryWritePodGroup(file, height, headerSeparator, static_cast<uint8_t>(cells.size()))) {
     LOG_ERR("PTB", "Serialization failed: could not write table row metadata");
     return false;
   }
@@ -415,10 +411,8 @@ bool PageTableFragment::serialize(FsFile& file) {
     return false;
   }
 
-  if (!serialization::tryWritePod(file, xPos) || !serialization::tryWritePod(file, yPos) ||
-      !serialization::tryWritePod(file, width) || !serialization::tryWritePod(file, columnCount) ||
-      !serialization::tryWritePod(file, cellPadding) || !serialization::tryWritePod(file, lineHeight) ||
-      !serialization::tryWritePod(file, static_cast<uint8_t>(rows.size()))) {
+  if (!serialization::tryWritePodGroup(file, xPos, yPos, width, columnCount, cellPadding, lineHeight,
+                                       static_cast<uint8_t>(rows.size()))) {
     LOG_ERR("PTB", "Serialization failed: could not write fragment metadata");
     return false;
   }

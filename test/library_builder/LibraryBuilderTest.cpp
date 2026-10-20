@@ -1175,6 +1175,22 @@ TEST_F(LibraryBuilderTest, InvalidationDuringScanSurvivesSuccessfulPublish) {
   EXPECT_FALSE(libraryIndexNeedsRefresh());
 }
 
+TEST_F(LibraryBuilderTest, OrganizingWithoutCallbacksStillServicesOtherTasks) {
+  fake::reset();
+  for (unsigned i = 0; i < 1000; i++) fake::add("/book" + numbered("", i) + ".txt");
+  fake::onService = [] {
+    // Model another task changing the card after the final index starts
+    // emitting, not an idle yield during metadata-cache initialization.
+    if (Storage.exists("/.crosspoint/library.new")) invalidateLibraryIndex();
+  };
+
+  ASSERT_TRUE(buildLibraryIndex("/", stats, false));
+  fake::onService = nullptr;
+
+  EXPECT_EQ(stats.books, 1000);
+  EXPECT_TRUE(libraryIndexNeedsRefresh());
+}
+
 TEST_F(LibraryBuilderTest, EmptyLibraryStillRecordsMetadataModeChanges) {
   fake::files.erase("/a.epub");
   fake::files.erase("/b.epub");
@@ -1199,11 +1215,16 @@ namespace {
 struct BuildProbe {
   // Cancel once this many EPUBs have been parsed; UINT_MAX never cancels.
   unsigned cancelAfterParses = ~0u;
+  bool cancelDuringEmit = false;
   unsigned progressCalls = 0;
   bool sawOrganizing = false;
   uint16_t booksWhenOrganizing = 0;
 
-  static bool cancel(void* context) { return fake::parses >= static_cast<BuildProbe*>(context)->cancelAfterParses; }
+  static bool cancel(void* context) {
+    const auto* probe = static_cast<BuildProbe*>(context);
+    return (probe->cancelDuringEmit && Storage.exists("/.crosspoint/library.new")) ||
+           fake::parses >= probe->cancelAfterParses;
+  }
   static void progress(void* context, const BuildProgress& progress) {
     auto* probe = static_cast<BuildProbe*>(context);
     probe->progressCalls++;
@@ -1244,6 +1265,26 @@ TEST_F(LibraryBuilderTest, CancelledScanKeepsPreviousIndexAndSaysWhy) {
   ASSERT_TRUE(buildLibraryIndex("/", stats, true));
   EXPECT_EQ(stats.failure, BuildFailure::None);
   EXPECT_EQ(stats.books, 42);
+}
+
+TEST_F(LibraryBuilderTest, CancellingDuringEmitKeepsPreviousIndex) {
+  initial();
+  const auto previous = fake::files[INDEX]->bytes;
+  for (unsigned i = 0; i < 128; i++) fake::add("/book" + numbered("", i) + ".txt");
+
+  BuildProbe probe;
+  probe.cancelDuringEmit = true;
+  const BuildCallbacks callbacks = probe.callbacks();
+  EXPECT_FALSE(buildLibraryIndex("/", stats, true, &callbacks));
+
+  EXPECT_TRUE(probe.sawOrganizing);
+  EXPECT_EQ(stats.failure, BuildFailure::Cancelled);
+  EXPECT_FALSE(stats.indexReplaced);
+  EXPECT_EQ(fake::files[INDEX]->bytes, previous);
+  EXPECT_FALSE(Storage.exists("/.crosspoint/library.stage"));
+  EXPECT_FALSE(Storage.exists("/.crosspoint/library.stage.f"));
+  EXPECT_FALSE(Storage.exists("/.crosspoint/library.new"));
+  EXPECT_TRUE(libraryIndexNeedsRefresh());
 }
 
 TEST_F(LibraryBuilderTest, ProgressReportsBooksFoundAndTheOrganizingPhase) {

@@ -380,12 +380,9 @@ bool TextBlock::serialize(HalFile& file) const {
     return false;
   }
 
-  if (!serialization::tryWritePod(file, numWords) ||
-      !serialization::tryWritePod(file, static_cast<uint8_t>(focusPresent ? 1 : 0)) ||
-      !serialization::tryWritePod(file, static_cast<uint8_t>(guideDotsPresent ? 1 : 0)) ||
-      !serialization::tryWritePod(file, static_cast<uint8_t>(wordFlagsPresent ? 1 : 0)) ||
-      !serialization::tryWritePod(file, static_cast<uint8_t>(wordSpacesPresent ? 1 : 0)) ||
-      !serialization::tryWritePod(file, textBytes)) {
+  if (!serialization::tryWritePodGroup(file, numWords, static_cast<uint8_t>(focusPresent),
+                                       static_cast<uint8_t>(guideDotsPresent), static_cast<uint8_t>(wordFlagsPresent),
+                                       static_cast<uint8_t>(wordSpacesPresent), textBytes)) {
     LOG_ERR("TXB", "Serialization failed: could not write block header");
     return false;
   }
@@ -398,6 +395,16 @@ bool TextBlock::serialize(HalFile& file) const {
     }
   }
 
+  if (!serializeRuby(file)) return false;
+
+  return serialization::tryWritePodGroup(
+      file, blockStyle.alignment, blockStyle.textAlignDefined, blockStyle.marginTop, blockStyle.marginBottom,
+      blockStyle.marginLeft, blockStyle.marginRight, blockStyle.paddingTop, blockStyle.paddingBottom,
+      blockStyle.paddingLeft, blockStyle.paddingRight, blockStyle.textIndent, blockStyle.textIndentDefined,
+      blockStyle.isRtl, blockStyle.directionDefined, blockStyle.fontSize, blockStyle.lineHeight);
+}
+
+bool TextBlock::serializeRuby(HalFile& file) const {
   uint16_t rubyCount = 0;
   for (uint16_t i = 0; i < numWords && i < rubyTexts.size(); ++i) {
     if (!rubyTexts[i].empty()) ++rubyCount;
@@ -407,23 +414,7 @@ bool TextBlock::serialize(HalFile& file) const {
     if (rubyTexts[i].empty()) continue;
     if (!serialization::tryWritePod(file, i) || !serialization::tryWriteString(file, rubyTexts[i])) return false;
   }
-
-  return serialization::tryWritePod(file, blockStyle.alignment) &&
-         serialization::tryWritePod(file, blockStyle.textAlignDefined) &&
-         serialization::tryWritePod(file, blockStyle.marginTop) &&
-         serialization::tryWritePod(file, blockStyle.marginBottom) &&
-         serialization::tryWritePod(file, blockStyle.marginLeft) &&
-         serialization::tryWritePod(file, blockStyle.marginRight) &&
-         serialization::tryWritePod(file, blockStyle.paddingTop) &&
-         serialization::tryWritePod(file, blockStyle.paddingBottom) &&
-         serialization::tryWritePod(file, blockStyle.paddingLeft) &&
-         serialization::tryWritePod(file, blockStyle.paddingRight) &&
-         serialization::tryWritePod(file, blockStyle.textIndent) &&
-         serialization::tryWritePod(file, blockStyle.textIndentDefined) &&
-         serialization::tryWritePod(file, blockStyle.isRtl) &&
-         serialization::tryWritePod(file, blockStyle.directionDefined) &&
-         serialization::tryWritePod(file, blockStyle.fontSize) &&
-         serialization::tryWritePod(file, blockStyle.lineHeight);
+  return true;
 }
 
 std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {

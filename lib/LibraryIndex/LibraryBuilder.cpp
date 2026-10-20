@@ -45,6 +45,7 @@ constexpr char CACHE_DIR[] = "/.crosspoint";
 constexpr size_t LIBRARY_IO_BUFFER_SIZE = 4096;
 // Sequential scratch streams need only a sector of buffering each.
 constexpr size_t SCRATCH_IO_BUFFER_SIZE = 512;
+constexpr uint32_t LIBRARY_WORK_BUDGET_MS = 8;
 
 // Matches lib/FileIndex's buffer so a name this walk accepts is one the file
 // browser could also show.
@@ -116,6 +117,7 @@ struct BuildControl {
   BuildProgress reported;
   uint32_t lastPollMs = 0;
   uint32_t lastProgressMs = 0;
+  uint32_t lastYieldMs = 0;
   bool cancelled = false;
 };
 BuildControl buildControl;
@@ -156,11 +158,16 @@ void setBuildPhase(const BuildPhase phase) {
 }
 
 // Let FreeRTOS run the idle task during every long phase, including builds
-// without a UI callback and the sort/emit work after the directory walk. The
-// counter keeps the delay out of tight per-byte operations while bounding CPU
-// work between yields. Cancellation and progress ride on the same calls.
+// without a UI callback and the sort/emit work after the directory walk. Sorts
+// and emit passes service several times per book; sleeping every 32 calls adds
+// a fixed delay even when those calls do almost no work. Batch the clock checks
+// instead, and yield after a short elapsed-work budget shared by all phases.
+// Cancellation and progress are still polled at every bounded work unit.
 void serviceBuilder(uint32_t& workUnits) {
-  if ((++workUnits & 0x1Fu) == 0) delay(1);
+  if ((++workUnits & 0x1Fu) == 0 && millis() - buildControl.lastYieldMs >= LIBRARY_WORK_BUDGET_MS) {
+    delay(1);
+    buildControl.lastYieldMs = millis();
+  }
   pollBuildControl();
 }
 
@@ -1848,7 +1855,7 @@ bool buildLibraryIndex(const char* rootPath, BuildStats& stats, const bool readM
   indexDirty.exchange(false, std::memory_order_relaxed);
   buildControl = BuildControl{};
   buildControl.callbacks = callbacks;
-  buildControl.lastPollMs = buildControl.lastProgressMs = millis();
+  buildControl.lastPollMs = buildControl.lastProgressMs = buildControl.lastYieldMs = millis();
   const bool ok = rebuildLibraryIndex(rootPath, stats, readMetadata);
   if (!ok && stats.failure == BuildFailure::None)
     stats.failure = buildControl.cancelled ? BuildFailure::Cancelled : BuildFailure::Error;

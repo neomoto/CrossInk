@@ -1,8 +1,10 @@
 #pragma once
 #include <HalStorage.h>
 
+#include <cstring>
 #include <iostream>
 #include <limits>
+#include <type_traits>
 
 namespace serialization {
 template <typename T>
@@ -18,6 +20,23 @@ static void writePod(FsFile& file, const T& value) {
 template <typename T>
 static bool tryWritePod(FsFile& file, const T& value) {
   return file.write(reinterpret_cast<const uint8_t*>(&value), sizeof(T)) == sizeof(T);
+}
+
+// Concatenate scalar fields without struct padding or a deferred flush. Keep
+// these short metadata records on the stack; large payloads are written directly.
+template <typename... Ts>
+static bool tryWritePodGroup(FsFile& file, const Ts&... values) {
+  static_assert((std::is_trivially_copyable<Ts>::value && ...), "Fields must be trivially copyable");
+  constexpr size_t byteCount = (sizeof(Ts) + ...);
+  static_assert(byteCount <= 64, "Use direct writes for larger payloads");
+  uint8_t bytes[byteCount];
+  size_t offset = 0;
+  const auto append = [&](const auto& value) {
+    std::memcpy(bytes + offset, &value, sizeof(value));
+    offset += sizeof(value);
+  };
+  (append(values), ...);
+  return file.write(bytes, byteCount) == byteCount;
 }
 
 template <typename T>

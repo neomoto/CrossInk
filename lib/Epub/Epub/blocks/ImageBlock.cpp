@@ -574,7 +574,7 @@ void ImageBlock::render(GfxRenderer& renderer, const int x, const int y, const b
 
 bool ImageBlock::serialize(FsFile& file) {
   return serialization::tryWriteString(file, imagePath) && serialization::tryWriteString(file, sourcePath) &&
-         serialization::tryWritePod(file, width) && serialization::tryWritePod(file, height);
+         serialization::tryWritePodGroup(file, width, height);
 }
 
 std::unique_ptr<ImageBlock> ImageBlock::deserialize(FsFile& file) {

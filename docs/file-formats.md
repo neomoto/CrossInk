@@ -599,6 +599,11 @@ suspended partials use `0xC4`. Older full and partial caches rebuild automatical
 so previously cached regular text does not hide the corrected styling. The CSS
 rule cache format is unchanged.
 
+Adjacent scalar metadata fields are batched into bounded stack-buffer writes.
+This changes write-call granularity only: field widths, order, representation,
+string payloads, and version `83` remain unchanged. Buffers contain the existing
+fields without C++ struct padding; a short write still fails the operation.
+
 ### Version 82
 
 Scalable-font EPUB headings and whole text blocks carry a resolved point size

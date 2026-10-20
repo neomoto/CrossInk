@@ -214,32 +214,14 @@ bool Section::writeSectionFileHeader(const ReaderRenderSpec& spec) {
                                    sizeof(pageCount) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) +
                                    sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t),
                 "Header size mismatch");
-  return serialization::tryWritePod(file, SECTION_CACHE_MAGIC) &&
-         serialization::tryWritePod(file, SECTION_FILE_VERSION) && serialization::tryWritePod(file, spec.fontId) &&
-         serialization::tryWritePod(file, spec.lineCompression) &&
-         serialization::tryWritePod(file, spec.extraParagraphSpacing) &&
-         serialization::tryWritePod(file, spec.forceParagraphIndents) &&
-         serialization::tryWritePod(file, spec.paragraphAlignment) &&
-         serialization::tryWritePod(file, spec.viewportWidth) &&
-         serialization::tryWritePod(file, spec.viewportHeight) &&
-         serialization::tryWritePod(file, spec.hyphenationEnabled) &&
-         serialization::tryWritePod(file, spec.embeddedStyle) &&
-         serialization::tryWritePod(file, spec.imageRendering) &&
-         serialization::tryWritePod(file, spec.focusReadingEnabled) &&
-         serialization::tryWritePod(file, spec.guideReadingEnabled) &&
-         serialization::tryWritePod(file, spec.wordSpacing) &&
-         serialization::tryWritePod(file, static_cast<uint8_t>(spec.renderMode)) &&
-         serialization::tryWritePod(file,
-                                    pageCount) &&  // Placeholder for page count (will be initially 0, patched later)
-         serialization::tryWritePod(file, static_cast<uint32_t>(0)) &&  // Protected image units (patched later)
-         serialization::tryWritePod(file, static_cast<uint32_t>(0)) &&  // Placeholder for LUT offset (patched later)
-         serialization::tryWritePod(file,
-                                    static_cast<uint32_t>(0)) &&  // Placeholder for anchor map offset (patched later)
-         serialization::tryWritePod(
-             file,
-             static_cast<uint32_t>(0)) &&  // Placeholder for paragraph LUT offset (patched later)
-         serialization::tryWritePod(file, static_cast<uint32_t>(0)) &&  // li LUT offset
-         serialization::tryWritePod(file, static_cast<uint32_t>(0));    // visible text LUT offset
+  // The header keeps the existing field order and native scalar widths without
+  // struct padding. Page counts and LUT offsets are still patched after parsing.
+  return serialization::tryWritePodGroup(
+      file, SECTION_CACHE_MAGIC, SECTION_FILE_VERSION, spec.fontId, spec.lineCompression, spec.extraParagraphSpacing,
+      spec.forceParagraphIndents, spec.paragraphAlignment, spec.viewportWidth, spec.viewportHeight,
+      spec.hyphenationEnabled, spec.embeddedStyle, spec.imageRendering, spec.focusReadingEnabled,
+      spec.guideReadingEnabled, spec.wordSpacing, static_cast<uint8_t>(spec.renderMode), pageCount, uint32_t{0},
+      uint32_t{0}, uint32_t{0}, uint32_t{0}, uint32_t{0}, uint32_t{0});
 }
 
 bool Section::loadSectionFile(const ReaderRenderSpec& spec) {

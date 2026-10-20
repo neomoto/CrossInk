@@ -8,6 +8,15 @@
 - Add opt-in, rate-limited rotation diagnostics with raw gravity, decision reasons,
   applied renderer orientation, and numeric reading anchors.
 
+### Changed
+
+- Build native simulators with optimization, debug symbols, and frame pointers;
+  add opt-in render-call timing for profiler-guided comparisons.
+- Build library indexes with an elapsed-work yield budget instead of fixed pauses
+  every 32 work units, retaining cancellation and cooperative task servicing.
+- Batch adjacent EPUB cache metadata into checked, bounded stack-buffer writes.
+  Serialized bytes, cache versions, and reading-position formats are unchanged.
+
 ### Fixed
 
 - Correct the X3's 180-degree in-plane sensor mounting for automatic EPUB/TXT

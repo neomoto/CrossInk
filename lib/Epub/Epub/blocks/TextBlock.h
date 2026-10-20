@@ -43,6 +43,7 @@ class TextBlock final : public Block {
   static size_t arenaSize(uint16_t wordCount, bool hasFocus, bool hasGuideDots, bool hasWordFlags, bool hasWordSpaces,
                           uint16_t textBytes);
   void bindArenaPointers();
+  bool serializeRuby(HalFile& file) const;
 
  public:
   static constexpr uint8_t WORD_FLAG_BACKGROUND_BLACK = 0x01;

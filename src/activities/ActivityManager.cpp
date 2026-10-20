@@ -15,6 +15,9 @@
 #include <Xtc.h>
 
 #include <algorithm>
+#ifdef SIMULATOR
+#include <cstdlib>
+#endif
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
@@ -473,6 +476,9 @@ void ActivityManager::renderTaskTrampoline(void* param) {
 }
 
 void ActivityManager::renderTaskLoop() {
+#ifdef SIMULATOR
+  const bool traceRender = std::getenv("CROSSINK_SIMULATOR_PERF_TRACE") != nullptr;
+#endif
   while (true) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     // Acquire the lock before reading currentActivity to avoid a TOCTOU race
@@ -485,7 +491,15 @@ void ActivityManager::renderTaskLoop() {
       // Apply Night Mode to each activity's normal-polarity frame. SleepActivity
       // preserves it only for Quick Resume and clears it for other sleep screens.
       display.setInverted(SETTINGS.screenInverted != 0);
+#ifdef SIMULATOR
+      const auto renderStartedUs = traceRender ? micros() : 0;
+#endif
       currentActivity->render(std::move(lock));
+#ifdef SIMULATOR
+      if (traceRender) {
+        LOG_INF("PERF", "render_us=%lu", static_cast<unsigned long>(micros() - renderStartedUs));
+      }
+#endif
       restoredActivityNeedsRender = false;
     }
     TouchRegistry::getInstance().publish();
