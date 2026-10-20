@@ -6,6 +6,7 @@
 #include <Logging.h>
 #include <Serialization.h>
 #include <Txt.h>
+#include <TxtPageIndex.h>
 #include <Xtc.h>
 
 #include <algorithm>
@@ -22,8 +23,6 @@ namespace {
 constexpr uint32_t EPUB_PERCENT_CACHE_MAGIC = 0x45505250;  // "EPRP"
 constexpr uint8_t EPUB_PERCENT_CACHE_VERSION = 1;
 constexpr char EPUB_PERCENT_CACHE_FILE[] = "/progress_percent.bin";
-constexpr uint32_t TXT_CACHE_MAGIC = 0x54585449;  // "TXTI"
-constexpr uint8_t TXT_CACHE_VERSION = 4;
 
 float clampProgressPercent(const float progress) { return std::clamp(progress, 0.0f, 100.0f); }
 
@@ -171,61 +170,10 @@ float loadTxtProgressPercent(const RecentBook& book) {
     return -1.0f;
   }
 
-  FsFile progressFile;
-  if (!Storage.openFileForRead("RBPR", txt.getCachePath() + "/progress.bin", progressFile)) {
-    return -1.0f;
-  }
-
-  // TXT progress starts with a 16-bit page number; the remaining bytes are a
-  // file offset used only to restore the reader page.
-  // Read the reader's four-byte minimum so an interrupted write is rejected,
-  // then decode only its two-byte page field.
-  uint8_t progressData[4];
-  const int progressBytes = progressFile.read(progressData, sizeof(progressData));
-  progressFile.close();
-  if (progressBytes != static_cast<int>(sizeof(progressData))) {
-    return -1.0f;
-  }
-
-  const uint16_t currentPage = static_cast<uint16_t>(progressData[0]) | (static_cast<uint16_t>(progressData[1]) << 8);
-
-  FsFile indexFile;
-  if (!Storage.openFileForRead("RBPR", txt.getCachePath() + "/index.bin", indexFile)) {
-    return -1.0f;
-  }
-
-  uint32_t magic = 0;
-  uint8_t version = 0;
-  uint32_t fileSize = 0;
-  int32_t cachedWidth = 0;
-  int32_t cachedLines = 0;
-  int32_t fontId = 0;
-  int32_t verticalMargin = 0;
-  int32_t horizontalMargin = 0;
-  uint8_t alignment = 0;
-  uint32_t totalPages = 0;
-  const bool readOk =
-      serialization::tryReadPod(indexFile, magic) && serialization::tryReadPod(indexFile, version) &&
-      serialization::tryReadPod(indexFile, fileSize) && serialization::tryReadPod(indexFile, cachedWidth) &&
-      serialization::tryReadPod(indexFile, cachedLines) && serialization::tryReadPod(indexFile, fontId) &&
-      serialization::tryReadPod(indexFile, verticalMargin) && serialization::tryReadPod(indexFile, horizontalMargin) &&
-      serialization::tryReadPod(indexFile, alignment) && serialization::tryReadPod(indexFile, totalPages);
-  indexFile.close();
-  if (!readOk) {
-    return -1.0f;
-  }
-  (void)cachedWidth;
-  (void)cachedLines;
-  (void)fontId;
-  (void)verticalMargin;
-  (void)horizontalMargin;
-  (void)alignment;
-
-  if (magic != TXT_CACHE_MAGIC || version != TXT_CACHE_VERSION || fileSize != txt.getFileSize() || totalPages == 0) {
-    return -1.0f;
-  }
-
-  return clampProgressPercent((static_cast<float>(currentPage + 1) / static_cast<float>(totalPages)) * 100.0f);
+  uint16_t currentPage = 0;
+  const auto totalPages = txtlayout::loadLegacyProgressPageCount(txt.getCachePath(), txt.getFileSize(), currentPage);
+  if (!totalPages) return -1.0f;
+  return clampProgressPercent((static_cast<float>(currentPage + 1) / static_cast<float>(*totalPages)) * 100.0f);
 }
 }  // namespace
 

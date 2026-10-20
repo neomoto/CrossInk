@@ -221,27 +221,39 @@ bool LibraryIndexFile::readPathHash(const ClixRecord& record, uint64_t& out) {
   return readAt(head.nameStart + record.nameOff, &out, sizeof(out));
 }
 
+bool LibraryIndexFile::readBlobFieldAt(uint32_t& at, std::string* out) {
+  if (at >= head.nameLen) return false;
+  uint8_t len = 0;
+  if (!readAt(head.nameStart + at, &len, sizeof(len))) return false;
+  ++at;
+  if (len > head.nameLen - at) return false;
+  if (out) {
+    out->resize(len);
+    if (len != 0 && !readAt(head.nameStart + at, out->data(), len)) return false;
+  }
+  at += len;
+  return true;
+}
+
+bool LibraryIndexFile::readBlobFields(const ClixRecord& record, std::string* const* fields, const uint8_t count,
+                                      uint32_t* seriesPosition) {
+  if (!opened || record.nameOff > head.nameLen || sizeof(uint64_t) + record.nameLen > head.nameLen - record.nameOff)
+    return false;
+  uint32_t at = record.nameOff + sizeof(uint64_t) + record.nameLen;
+  for (uint8_t i = 0; i < count; i++) {
+    if (!readBlobFieldAt(at, fields[i])) return false;
+  }
+  if (!seriesPosition) return true;
+  return at <= head.nameLen && sizeof(*seriesPosition) <= head.nameLen - at &&
+         readAt(head.nameStart + at, seriesPosition, sizeof(*seriesPosition));
+}
+
 bool LibraryIndexFile::readBlobField(const ClixRecord& record, const uint8_t field, std::string& out) {
   out.clear();
-  if (!opened || record.nameLen == 0) return false;
-  if (record.nameOff > head.nameLen || sizeof(uint64_t) > head.nameLen - record.nameOff ||
-      record.nameLen > head.nameLen - record.nameOff - sizeof(uint64_t))
-    return false;
-
-  uint32_t at = record.nameOff + sizeof(uint64_t) + record.nameLen;
-  for (uint8_t i = 0; i <= field; i++) {
-    if (at >= head.nameLen) return false;
-    uint8_t len = 0;
-    if (!readAt(head.nameStart + at, &len, sizeof(len))) return false;
-    ++at;
-    if (len > head.nameLen - at) return false;
-    if (i == field) {
-      out.resize(len);
-      return len == 0 || readAt(head.nameStart + at, out.data(), len);
-    }
-    at += len;
-  }
-  return false;
+  if (record.nameLen == 0) return false;
+  std::string* fields[5]{};
+  fields[field] = &out;
+  return readBlobFields(record, fields, field + 1);
 }
 
 bool LibraryIndexFile::readAuthor(const ClixRecord& record, std::string& out) {
@@ -255,7 +267,10 @@ bool LibraryIndexFile::readTitle(const ClixRecord& record, std::string& out) {
 }
 
 bool LibraryIndexFile::readDisplayText(const ClixRecord& record, std::string& title, std::string& author) {
-  if (!readBlobField(record, 1, title) || !readBlobField(record, 0, author)) return false;
+  title.clear();
+  author.clear();
+  std::string* fields[] = {&author, &title};
+  if (record.nameLen == 0 || !readBlobFields(record, fields, 2)) return false;
   if (title.empty()) {
     if (!readName(record, title)) return false;
     const size_t dot = title.find_last_of('.');
@@ -278,19 +293,22 @@ bool LibraryIndexFile::readGenre(const ClixRecord& record, std::string& out) {
 
 bool LibraryIndexFile::readSeriesPosition(const ClixRecord& record, uint32_t& out) {
   out = CLIX_UNKNOWN_SERIES_POSITION;
-  if (!opened || head.formatVersion < 6 || record.nameOff > head.nameLen ||
-      sizeof(uint64_t) + record.nameLen > head.nameLen - record.nameOff)
-    return false;
-  uint32_t at = record.nameOff + sizeof(uint64_t) + record.nameLen;
-  for (uint8_t field = 0; field < 5; field++) {
-    if (at >= head.nameLen) return false;
-    uint8_t length = 0;
-    if (!readAt(head.nameStart + at, &length, sizeof(length))) return false;
-    ++at;
-    if (length > head.nameLen - at) return false;
-    at += length;
-  }
-  return at <= head.nameLen && sizeof(out) <= head.nameLen - at && readAt(head.nameStart + at, &out, sizeof(out));
+  if (!opened || head.formatVersion < 6) return false;
+  std::string* fields[5]{};
+  return readBlobFields(record, fields, 5, &out);
+}
+
+bool LibraryIndexFile::readSourceMetadata(const ClixRecord& record, std::string& title, std::string& sourceAuthor,
+                                          std::string& series, std::string& genre, uint32_t& seriesPosition) {
+  title.clear();
+  sourceAuthor.clear();
+  series.clear();
+  genre.clear();
+  seriesPosition = CLIX_UNKNOWN_SERIES_POSITION;
+  if (record.nameLen == 0) return false;
+  std::string* fields[] = {nullptr, &title, &sourceAuthor, &series, &genre};
+  const uint8_t count = head.formatVersion >= 3 ? 5 : 3;
+  return readBlobFields(record, fields, count, head.formatVersion >= 6 ? &seriesPosition : nullptr);
 }
 
 bool LibraryIndexFile::readPath(const ClixRecord& record, std::string& out) {

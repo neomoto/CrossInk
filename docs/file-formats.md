@@ -21,7 +21,7 @@ cannot revive history from a previous session. This new sidecar does not change
 EPUB layout cache formats. As with in-memory Back history, changing font or
 layout may shift the destination page.
 
-## `/.crosspoint/txt_<hash>/index.bin`
+## `/.crosspoint/txt_<hash>/index.bin` and `index.wide.bin`
 
 ### Version 5
 
@@ -44,6 +44,15 @@ The header contains 34 serialized bytes without padding.
 
 Page-start offsets follow as little-endian `u32` values.
 A version 4 index supplies only legacy byte anchors. It never drives new pagination.
+
+The desired viewport selects `index.bin` when width is no greater than height,
+or the fixed `index.wide.bin` slot otherwise. Both use the same version and
+serialized fields. A retained slot is accepted only when its complete existing
+layout key matches. Temporary/backup files are local to that slot.
+
+Legacy page-only progress always resolves against the original version 4
+`index.bin` before replacement. The wide slot never supplies that old page's
+byte anchor.
 
 ## `/.crosspoint/txt_<hash>/progress.bin`
 
@@ -604,6 +613,13 @@ This changes write-call granularity only: field widths, order, representation,
 string payloads, and version `83` remain unchanged. Buffers contain the existing
 fields without C++ struct padding; a short write still fails the operation.
 
+Each spine/cache suffix keeps its original active `.bin` and one fixed
+`<active>.alt.bin` alternative. Their serialized contents and version are
+identical. A complete desired render-spec match is required before reuse.
+Activation leaves the selected layout at the original filename; metadata-only
+sync readers therefore continue to read the last activated page count and LUTs.
+Existing `.bak`, `.tmp`, and `.part` files provide bounded transaction recovery.
+
 ### Version 82
 
 Scalable-font EPUB headings and whole text blocks carry a resolved point size
@@ -710,9 +726,9 @@ geometry, oversized-word wrapping, inline-image margins, and ruby continuation
 layout. Full and suspended section caches rebuild together; complete files use
 version byte `61`, and suspended partials use sentinel byte `0xF8`.
 
-Each file in `sections/*.bin` stores one laid-out spine section. The header is
-also the cache-busting key: if any layout-affecting setting differs from the
-current reader settings, the section is discarded and rebuilt.
+Each completed layout stores one laid-out spine section. Its header is also the
+cache-busting key. If the active layout differs from current settings, the reader
+checks the retained alternate; it rebuilds only when neither matches.
 
 Version 59 adds a compact page-start visible-text-offset lookup table. The
 offset is a Unicode codepoint coordinate in the spine XHTML, so reader progress

@@ -7,6 +7,7 @@
 #include <I18n.h>
 #include <Memory.h>
 #include <Serialization.h>
+#include <TxtPageIndex.h>
 #include <TxtPageLayout.h>
 
 #include <algorithm>
@@ -28,67 +29,6 @@
 namespace {
 constexpr size_t CHUNK_SIZE = 8 * 1024;  // 8KB chunk for reading
 constexpr unsigned long LONG_PRESS_MENU_MS = 600;
-// Cache file magic and version
-constexpr uint32_t CACHE_MAGIC = 0x54585449;  // "TXTI"
-constexpr uint8_t CACHE_VERSION = 5;          // Forward-greedy TXT line boundaries
-constexpr uint32_t MAX_CACHE_PAGES = 65535;   // Sanity cap to prevent unbounded reserve()
-constexpr uint8_t LEGACY_CACHE_VERSION = 4;   // Used only to migrate page-only bookmarks
-constexpr size_t CACHE_HEADER_BYTES = 34;
-
-uint32_t readLittleEndian32(const uint8_t* data) {
-  return static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
-         (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
-}
-
-bool isLegacyCacheHeader(const uint8_t* header, const size_t fileSize, const size_t cacheSize, const uint16_t page) {
-  if (readLittleEndian32(header) != CACHE_MAGIC || header[4] != LEGACY_CACHE_VERSION) return false;
-  if (readLittleEndian32(header + 5) != fileSize) return false;
-  const uint32_t numPages = readLittleEndian32(header + 30);
-  if (numPages == 0 || numPages > MAX_CACHE_PAGES || page >= numPages) return false;
-  return cacheSize == CACHE_HEADER_BYTES + numPages * sizeof(uint32_t);
-}
-
-std::optional<size_t> readLegacyCacheOffset(const Txt& txt, const uint16_t page) {
-  HalFile cache;
-  if (!Storage.openFileForRead("TRS", txt.getCachePath() + "/index.bin", cache)) return std::nullopt;
-  uint8_t header[CACHE_HEADER_BYTES];
-  if (cache.read(header, sizeof(header)) != static_cast<int>(sizeof(header)) ||
-      !isLegacyCacheHeader(header, txt.getFileSize(), cache.size(), page)) {
-    return std::nullopt;
-  }
-  if (!cache.seekSet(CACHE_HEADER_BYTES + page * sizeof(uint32_t))) return std::nullopt;
-  uint8_t data[4];
-  if (cache.read(data, sizeof(data)) != static_cast<int>(sizeof(data))) return std::nullopt;
-  const uint32_t offset = readLittleEndian32(data);
-  if (offset >= txt.getFileSize()) return std::nullopt;
-  return offset;
-}
-
-std::optional<size_t> readLegacyProgressOffset(const Txt& txt) {
-  HalFile progress;
-  if (!Storage.openFileForRead("TRS", txt.getCachePath() + "/progress.bin", progress)) return std::nullopt;
-  uint8_t data[6];
-  const auto bytesRead = progress.read(data, sizeof(data));
-  progress.close();
-  // Historical format: page(2) + reserved zeroes(2). Five bytes can be an
-  // interrupted extension; preserve the reader's existing four-byte minimum.
-  if (bytesRead < 4 || bytesRead == static_cast<int>(sizeof(data))) return std::nullopt;
-  return readLegacyCacheOffset(txt, static_cast<uint16_t>(data[0] | (data[1] << 8)));
-}
-
-bool upgradeLegacyProgress(const Txt& txt, const size_t offset) {
-  // Replace the historical reserved bytes and append the offset without
-  // truncating its page field. A short write keeps the v4 cache recoverable.
-  const std::string path = txt.getCachePath() + "/progress.bin";
-  HalFile progress = Storage.open(path.c_str(), O_WRONLY);
-  if (!progress || !progress.seekSet(2)) return false;
-  const uint8_t data[4] = {static_cast<uint8_t>(offset), static_cast<uint8_t>(offset >> 8),
-                           static_cast<uint8_t>(offset >> 16), static_cast<uint8_t>(offset >> 24)};
-  const bool persisted = progress.write(data, sizeof(data)) == sizeof(data) && progress.sync();
-  progress.close();
-  if (!persisted) LOG_ERR("TRS", "Failed to migrate legacy TXT progress");
-  return persisted;
-}
 
 int getReaderLineHeight(const GfxRenderer& renderer, const int fontId) {
   return std::max(1, static_cast<int>(renderer.getLineHeight(fontId) * SETTINGS.getReaderLineCompression() + 0.5f));
@@ -751,37 +691,34 @@ void TxtReaderActivity::initializeReader() {
       cachedVerticalMargin, static_cast<uint8_t>(cachedBottomStatusBarHeight + ReaderUtils::STATUS_BAR_TEXT_PADDING));
 
   viewportWidth = renderer.getScreenWidth() - cachedOrientedMarginLeft - cachedOrientedMarginRight;
-  const int viewportHeight = renderer.getScreenHeight() - cachedOrientedMarginTop - cachedOrientedMarginBottom;
+  viewportHeight = renderer.getScreenHeight() - cachedOrientedMarginTop - cachedOrientedMarginBottom;
   const int lineHeight = getReaderLineHeight(renderer, cachedFontId);
 
   linesPerPage = viewportHeight / lineHeight;
   if (linesPerPage < 1) linesPerPage = 1;
 
-  // Resolve persisted metadata before replacement, but never prefer it to a
-  // live pending/retained reading position after a failed migration.
-  std::optional<size_t> legacyOffset;
-  if (!loadPageIndexCache()) {
-    legacyOffset = readLegacyProgressOffset(*txt);
-    const bool canReplaceCache = !legacyOffset || upgradeLegacyProgress(*txt, *legacyOffset);
-    buildPageIndex();
-    if (canReplaceCache) savePageIndexCache();
+  // Resolve the original v4 byte anchor even when the selected wide cache is
+  // already valid. A page-only legacy bookmark never belongs to the wide slot.
+  const auto migration = txtlayout::migrateLegacyProgress(txt->getCachePath(), txt->getFileSize());
+  if (!loadPageIndexCache() && buildPageIndex()) {
+    savePageIndexCache(migration.replacementSafe);
   }
 
   const auto restoreOffset =
-      txtlayout::preferredRestoreOffset(pendingOrientationOffset, rotationReadingOffset, legacyOffset);
+      txtlayout::preferredRestoreOffset(pendingOrientationOffset, rotationReadingOffset, migration.offset);
   if (restoreOffset && !pageOffsets.empty()) {
     const auto nextPage = std::upper_bound(pageOffsets.begin(), pageOffsets.end(), *restoreOffset);
     currentPage = std::max(0, static_cast<int>(nextPage - pageOffsets.begin()) - 1);
     rotationReadingOffset = *restoreOffset;
     pendingOrientationOffset.reset();
   } else {
-    loadProgress();
+    currentPage = 0;
   }
 
   initialized = true;
 }
 
-void TxtReaderActivity::buildPageIndex() {
+bool TxtReaderActivity::buildPageIndex() {
   pageOffsets.clear();
   pageOffsets.push_back(0);  // First page starts at offset 0
 
@@ -815,6 +752,8 @@ void TxtReaderActivity::buildPageIndex() {
   }
 
   totalPages = pageOffsets.size();
+  // Do not publish an index truncated by a read/allocation/layout failure.
+  return offset >= fileSize;
 }
 
 bool TxtReaderActivity::loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset) {
@@ -1026,24 +965,9 @@ bool TxtReaderActivity::saveProgress(const int page) {
   }
   // A pending relayout has no page starts yet. Retain the last valid record.
   if (page < 0 || page >= static_cast<int>(pageOffsets.size())) return true;
-  HalFile f;
-  if (!Storage.openFileForWrite("TRS", txt->getCachePath() + "/progress.bin", f)) {
-    return false;
-  }
-  // 6-byte format: page(2 bytes LE) + exact page-start offset(4 bytes LE).
-  // Sleep reconstruction starts rendering here, not at the interior rotation anchor.
+  // Keep the existing six-byte page-start anchor and save scheduling.
   const size_t offset = pageOffsets[page];
-  uint8_t data[6];
-  data[0] = page & 0xFF;
-  data[1] = (page >> 8) & 0xFF;
-  data[2] = offset & 0xFF;
-  data[3] = (offset >> 8) & 0xFF;
-  data[4] = (offset >> 16) & 0xFF;
-  data[5] = (offset >> 24) & 0xFF;
-  const bool written = f.write(data, sizeof(data)) == sizeof(data);
-  f.close();
-  if (!written) {
-    LOG_ERR("TRS", "Short write saving reader progress");
+  if (!txtlayout::saveProgressRecord(txt->getCachePath(), static_cast<uint16_t>(page), static_cast<uint32_t>(offset))) {
     return false;
   }
   progressSaveDebouncer.markPersisted(static_cast<uint32_t>(page), static_cast<uint32_t>(offset));
@@ -1065,152 +989,23 @@ bool TxtReaderActivity::flushQueuedProgress() {
          saveProgress(static_cast<int>(progressSaveDebouncer.lastObservedPosition()));
 }
 
-void TxtReaderActivity::loadProgress() {
-  HalFile f;
-  if (Storage.openFileForRead("TRS", txt->getCachePath() + "/progress.bin", f)) {
-    uint8_t data[6];
-    const auto bytesRead = f.read(data, sizeof(data));
-    if (bytesRead >= 4) {
-      currentPage = data[0] + (data[1] << 8);
-      if (bytesRead == sizeof(data) && !pageOffsets.empty()) {
-        const uint32_t offset = static_cast<uint32_t>(data[2]) | (static_cast<uint32_t>(data[3]) << 8) |
-                                (static_cast<uint32_t>(data[4]) << 16) | (static_cast<uint32_t>(data[5]) << 24);
-        if (offset < txt->getFileSize()) {
-          const auto nextPage = std::upper_bound(pageOffsets.begin(), pageOffsets.end(), offset);
-          currentPage = std::max(0, static_cast<int>(nextPage - pageOffsets.begin()) - 1);
-          rotationReadingOffset = offset;
-        }
-      }
-      currentPage = std::clamp(currentPage, 0, std::max(0, totalPages - 1));
-    }
-    f.close();
-  }
-}
-
 bool TxtReaderActivity::loadPageIndexCache() {
-  // Cache file format (using serialization module):
-  // - uint32_t: magic "TXTI"
-  // - uint8_t: cache version
-  // - uint32_t: file size (to validate cache)
-  // - int32_t: viewport width
-  // - int32_t: lines per page
-  // - int32_t: font ID (to invalidate cache on font change)
-  // - int32_t: vertical and horizontal screen margins (to invalidate cache on margin changes)
-  // - uint8_t: paragraph alignment (to invalidate cache on alignment change)
-  // - uint32_t: total pages count
-  // - N * uint32_t: page offsets
-
-  std::string cachePath = txt->getCachePath() + "/index.bin";
-  HalFile f;
-  if (!Storage.openFileForRead("TRS", cachePath, f)) {
-    LOG_DBG("TRS", "No page index cache found");
-    return false;
-  }
-
-  // Read and validate header using serialization module
-  uint32_t magic;
-  serialization::readPod(f, magic);
-  if (magic != CACHE_MAGIC) {
-    LOG_DBG("TRS", "Cache magic mismatch, rebuilding");
-    return false;
-  }
-
-  uint8_t version;
-  serialization::readPod(f, version);
-  if (version != CACHE_VERSION) {
-    LOG_DBG("TRS", "Cache version mismatch (%d != %d), rebuilding", version, CACHE_VERSION);
-    return false;
-  }
-
-  uint32_t fileSize;
-  serialization::readPod(f, fileSize);
-  if (fileSize != txt->getFileSize()) {
-    LOG_DBG("TRS", "Cache file size mismatch, rebuilding");
-    return false;
-  }
-
-  int32_t cachedWidth;
-  serialization::readPod(f, cachedWidth);
-  if (cachedWidth != viewportWidth) {
-    LOG_DBG("TRS", "Cache viewport width mismatch, rebuilding");
-    return false;
-  }
-
-  int32_t cachedLines;
-  serialization::readPod(f, cachedLines);
-  if (cachedLines != linesPerPage) {
-    LOG_DBG("TRS", "Cache lines per page mismatch, rebuilding");
-    return false;
-  }
-
-  int32_t fontId;
-  serialization::readPod(f, fontId);
-  if (fontId != cachedFontId) {
-    LOG_DBG("TRS", "Cache font ID mismatch (%d != %d), rebuilding", fontId, cachedFontId);
-    return false;
-  }
-
-  int32_t verticalMargin;
-  int32_t horizontalMargin;
-  serialization::readPod(f, verticalMargin);
-  serialization::readPod(f, horizontalMargin);
-  if (verticalMargin != cachedVerticalMargin || horizontalMargin != cachedHorizontalMargin) {
-    LOG_DBG("TRS", "Cache screen margins mismatch, rebuilding");
-    return false;
-  }
-
-  uint8_t alignment;
-  serialization::readPod(f, alignment);
-  if (alignment != cachedParagraphAlignment) {
-    LOG_DBG("TRS", "Cache paragraph alignment mismatch, rebuilding");
-    return false;
-  }
-
-  uint32_t numPages;
-  serialization::readPod(f, numPages);
-  if (numPages > MAX_CACHE_PAGES) {
-    LOG_ERR("TRS", "Cache numPages %u exceeds cap %u, cache invalid", numPages, MAX_CACHE_PAGES);
-    f.close();
-    return false;
-  }
-
-  // Read page offsets
-  pageOffsets.clear();
-  pageOffsets.reserve(numPages);
-
-  for (uint32_t i = 0; i < numPages; i++) {
-    uint32_t offset;
-    serialization::readPod(f, offset);
-    pageOffsets.push_back(offset);
-  }
-
+  const txtlayout::PageIndexSpec spec{
+      txt->getFileSize(),     viewportWidth,           linesPerPage, cachedFontId, cachedVerticalMargin,
+      cachedHorizontalMargin, cachedParagraphAlignment};
+  const auto path = txtlayout::pageIndexPath(txt->getCachePath(), viewportWidth, viewportHeight);
+  if (!txtlayout::loadPageIndex(path, spec, pageOffsets)) return false;
   totalPages = pageOffsets.size();
   return true;
 }
 
-void TxtReaderActivity::savePageIndexCache() const {
-  std::string cachePath = txt->getCachePath() + "/index.bin";
-  HalFile f;
-  if (!Storage.openFileForWrite("TRS", cachePath, f)) {
+void TxtReaderActivity::savePageIndexCache(const bool legacyMigrationComplete) const {
+  const txtlayout::PageIndexSpec spec{
+      txt->getFileSize(),     viewportWidth,           linesPerPage, cachedFontId, cachedVerticalMargin,
+      cachedHorizontalMargin, cachedParagraphAlignment};
+  const auto path = txtlayout::pageIndexPath(txt->getCachePath(), viewportWidth, viewportHeight);
+  if (!txtlayout::savePageIndex(path, spec, pageOffsets, legacyMigrationComplete)) {
     LOG_ERR("TRS", "Failed to save page index cache");
-    return;
-  }
-
-  // Write header using serialization module
-  serialization::writePod(f, CACHE_MAGIC);
-  serialization::writePod(f, CACHE_VERSION);
-  serialization::writePod(f, static_cast<uint32_t>(txt->getFileSize()));
-  serialization::writePod(f, static_cast<int32_t>(viewportWidth));
-  serialization::writePod(f, static_cast<int32_t>(linesPerPage));
-  serialization::writePod(f, static_cast<int32_t>(cachedFontId));
-  serialization::writePod(f, static_cast<int32_t>(cachedVerticalMargin));
-  serialization::writePod(f, static_cast<int32_t>(cachedHorizontalMargin));
-  serialization::writePod(f, cachedParagraphAlignment);
-  serialization::writePod(f, static_cast<uint32_t>(pageOffsets.size()));
-
-  // Write page offsets
-  for (size_t offset : pageOffsets) {
-    serialization::writePod(f, static_cast<uint32_t>(offset));
   }
 }
 
@@ -1286,66 +1081,35 @@ bool TxtReaderActivity::drawCurrentPageToBuffer(const std::string& filePath, Gfx
         if (off < txt.getFileSize()) {
           savedOffset = off;
           offsetKnown = true;
+        } else {
+          // Its page number has no usable geometry-independent anchor.
+          savedPage = 0;
         }
       } else if (n >= 4) {
         // Resolve only the old byte anchor, never render with old pagination.
-        const auto legacyOffset = readLegacyCacheOffset(txt, static_cast<uint16_t>(savedPage));
+        const auto legacyOffset =
+            txtlayout::readLegacyCacheOffset(txt.getCachePath(), txt.getFileSize(), static_cast<uint16_t>(savedPage));
         if (legacyOffset) {
           savedOffset = *legacyOffset;
           offsetKnown = true;
+        } else {
+          // Never interpret an unresolved legacy page against another layout.
+          savedPage = 0;
         }
       }
     }
   }
 
-  // Step 2: If progress.bin didn't provide the offset, fall back to index.bin.
+  // Step 2: If no byte anchor was saved, read only the matching geometry's
+  // validated index. Legacy page-only progress was resolved from index.bin above.
   if (!offsetKnown) {
-    std::string cachePath = txt.getCachePath() + "/index.bin";
-    FsFile cacheFile;
-    if (Storage.openFileForRead("SLP", cachePath, cacheFile)) {
-      uint32_t magic;
-      serialization::readPod(cacheFile, magic);
-      uint8_t version;
-      serialization::readPod(cacheFile, version);
-      uint32_t cachedFileSize;
-      serialization::readPod(cacheFile, cachedFileSize);
-      int32_t cachedVw, cachedLpp, cachedFontId, cachedVerticalMargin, cachedHorizontalMargin;
-      serialization::readPod(cacheFile, cachedVw);
-      serialization::readPod(cacheFile, cachedLpp);
-      serialization::readPod(cacheFile, cachedFontId);
-      serialization::readPod(cacheFile, cachedVerticalMargin);
-      serialization::readPod(cacheFile, cachedHorizontalMargin);
-      uint8_t cachedAlignment;
-      serialization::readPod(cacheFile, cachedAlignment);
-      uint32_t numPages;
-      serialization::readPod(cacheFile, numPages);
-
-      if (magic == CACHE_MAGIC && version == CACHE_VERSION && cachedFileSize == txt.getFileSize() && cachedVw == vw &&
-          cachedLpp == linesPerPage && cachedFontId == fontId && cachedVerticalMargin == verticalMargin &&
-          cachedHorizontalMargin == horizontalMargin && cachedAlignment == paragraphAlignment && numPages > 0 &&
-          numPages <= MAX_CACHE_PAGES) {
-        if (savedPage < 0 || savedPage >= static_cast<int>(numPages)) savedPage = 0;
-        for (uint32_t i = 0; i < numPages; i++) {
-          uint32_t off;
-          serialization::readPod(cacheFile, off);
-          if (static_cast<int>(i) == savedPage) {
-            if (off < txt.getFileSize()) {
-              savedOffset = off;
-              offsetKnown = true;
-            } else {
-              LOG_DBG("SLP", "TXT: index.bin offset %u out of range (fileSize=%u), ignoring", off, txt.getFileSize());
-            }
-          }
-        }
-      } else {
-        LOG_DBG("SLP", "TXT: index cache invalid or stale");
-      }
-      cacheFile.close();
-    }
-
-    // Step 3: No valid cache at all; render from the start of the file as a last resort.
-    // This shows page 1 rather than a blank screen, which is always preferable.
-    if (!offsetKnown) {
+    const txtlayout::PageIndexSpec spec{txt.getFileSize(), vw, linesPerPage, fontId, verticalMargin, horizontalMargin,
+                                        paragraphAlignment};
+    const auto path = txtlayout::pageIndexPath(txt.getCachePath(), vw, vh);
+    const auto offset = txtlayout::readPageIndexOffset(path, spec, static_cast<uint16_t>(savedPage));
+    if (offset) {
+      savedOffset = *offset;
+    } else {
       LOG_DBG("SLP", "TXT: no valid cache, falling back to start of file");
       savedOffset = 0;
     }

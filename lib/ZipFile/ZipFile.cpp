@@ -21,6 +21,15 @@ constexpr uint16_t ZIP_METHOD_STORED = 0;
 constexpr uint16_t ZIP_METHOD_DEFLATED = 8;
 constexpr size_t ONE_SHOT_DEFLATE_MAX_COMPRESSED_BYTES = 32768;
 
+uint16_t readLe16(const uint8_t* bytes) {
+  return static_cast<uint16_t>(bytes[0]) | (static_cast<uint16_t>(bytes[1]) << 8);
+}
+
+uint32_t readLe32(const uint8_t* bytes) {
+  return static_cast<uint32_t>(bytes[0]) | (static_cast<uint32_t>(bytes[1]) << 8) |
+         (static_cast<uint32_t>(bytes[2]) << 16) | (static_cast<uint32_t>(bytes[3]) << 24);
+}
+
 // RAII zip: opens the zip if not already open, closes on destruction only if
 // it performed the open.  Removes the wasOpen/close boilerplate from every method.
 class ScopedOpenClose final {
@@ -277,48 +286,79 @@ void ZipFileStreamReader::abort() {
   compressedConsumed = 0;
 }
 
+bool ZipFile::seekCentralDirectory() {
+  if (!loadZipDetails()) return false;
+  if (!file.seek(zipDetails.centralDirOffset)) {
+    LOG_ERR("ZIP", "Failed to seek central directory");
+    lastCentralDirPosValid = false;
+    return false;
+  }
+  return true;
+}
+
+ZipFile::CentralDirectoryReadStatus ZipFile::readCentralDirectoryHeader(CentralDirectoryHeader& header) {
+  uint8_t bytes[46];
+  const int bytesRead = file.read(bytes, sizeof(bytes));
+  if (bytesRead >= 4 && readLe32(bytes) != 0x02014b50) {
+    return CentralDirectoryReadStatus::End;
+  }
+  if (bytesRead != static_cast<int>(sizeof(bytes))) {
+    LOG_ERR("ZIP", "Failed to read central directory header: %d", bytesRead);
+    lastCentralDirPosValid = false;
+    return CentralDirectoryReadStatus::Error;
+  }
+
+  header.stat.method = readLe16(bytes + 10);
+  header.crc32 = readLe32(bytes + 16);
+  header.stat.compressedSize = readLe32(bytes + 20);
+  header.stat.uncompressedSize = readLe32(bytes + 24);
+  header.nameLength = readLe16(bytes + 28);
+  header.extraLength = readLe16(bytes + 30);
+  header.commentLength = readLe16(bytes + 32);
+  header.stat.localHeaderOffset = readLe32(bytes + 42);
+  return CentralDirectoryReadStatus::Entry;
+}
+
+bool ZipFile::readCentralDirectoryName(const CentralDirectoryHeader& header, char (&name)[256]) {
+  bool nameRead;
+  if (header.nameLength < sizeof(name)) {
+    nameRead = file.read(name, header.nameLength) == header.nameLength;
+    if (nameRead) {
+      name[header.nameLength] = '\0';
+    }
+  } else {
+    nameRead = file.seekCur(header.nameLength);
+  }
+  if (!nameRead || !file.seekCur(static_cast<uint32_t>(header.extraLength) + header.commentLength)) {
+    LOG_ERR("ZIP", "Failed to read central directory name or skip entry fields");
+    lastCentralDirPosValid = false;
+    return false;
+  }
+  return true;
+}
+
 bool ZipFile::loadAllFileStatSlims() {
   const ScopedOpenClose zip{*this};
   if (!zip) return false;
 
-  if (!loadZipDetails()) return false;
+  if (!seekCentralDirectory()) return false;
 
-  file.seek(zipDetails.centralDirOffset);
-
-  uint32_t sig;
   char itemName[256];
   fileStatSlimCache.clear();
   fileStatSlimCache.reserve(zipDetails.totalEntries);
 
   while (file.available()) {
-    file.read(&sig, 4);
-    if (sig != 0x02014b50) break;  // End of list
-
-    FileStatSlim fileStat = {};
-
-    file.seekCur(6);
-    file.read(&fileStat.method, 2);
-    file.seekCur(8);
-    file.read(&fileStat.compressedSize, 4);
-    file.read(&fileStat.uncompressedSize, 4);
-    uint16_t nameLen, m, k;
-    file.read(&nameLen, 2);
-    file.read(&m, 2);
-    file.read(&k, 2);
-    file.seekCur(8);
-    file.read(&fileStat.localHeaderOffset, 4);
-
-    if (nameLen < sizeof(itemName)) {
-      file.read(itemName, nameLen);
-      itemName[nameLen] = '\0';
-      fileStatSlimCache.emplace(itemName, fileStat);
-    } else {
-      // Skip over oversized entry names to avoid writing past fixed buffer.
-      file.seekCur(nameLen);
+    CentralDirectoryHeader header;
+    const auto status = readCentralDirectoryHeader(header);
+    if (status == CentralDirectoryReadStatus::End) break;
+    if (status == CentralDirectoryReadStatus::Error || !readCentralDirectoryName(header, itemName)) {
+      fileStatSlimCache.clear();
+      return false;
     }
 
-    // Skip the rest of this entry (extra field + comment)
-    file.seekCur(m + k);
+    if (header.nameLength < sizeof(itemName)) {
+      fileStatSlimCache.emplace(itemName, header.stat);
+    }
   }
 
   // Set cursor to start of central directory for sequential access
@@ -343,69 +383,49 @@ bool ZipFile::loadFileStatSlim(const char* filename, FileStatSlim* fileStat) {
 
   if (!loadZipDetails()) return false;
 
-  // Phase 1: Try scanning from cursor position first
-  uint32_t startPos = lastCentralDirPosValid ? lastCentralDirPos : zipDetails.centralDirOffset;
+  return findFileStatSlim(filename, fileStat);
+}
+
+bool ZipFile::findFileStatSlim(const char* filename, FileStatSlim* fileStat) {
+  const uint32_t startPos = lastCentralDirPosValid ? lastCentralDirPos : zipDetails.centralDirOffset;
   bool wrapped = false;
-  bool found = false;
+  if (!file.seek(startPos)) {
+    LOG_ERR("ZIP", "Failed to seek central directory cursor");
+    lastCentralDirPosValid = false;
+    return false;
+  }
 
-  file.seek(startPos);
-
-  uint32_t sig;
   char itemName[256];
-
   while (true) {
-    uint32_t entryStart = file.position();
-
-    if (file.read(&sig, 4) != 4 || sig != 0x02014b50) {
-      // End of central directory
-      if (!wrapped && lastCentralDirPosValid && startPos != zipDetails.centralDirOffset) {
-        // Wrap around to beginning
-        file.seek(zipDetails.centralDirOffset);
+    const uint32_t entryStart = file.position();
+    CentralDirectoryHeader header;
+    const auto status = readCentralDirectoryHeader(header);
+    if (status == CentralDirectoryReadStatus::Error) return false;
+    if (status == CentralDirectoryReadStatus::End) {
+      if (!wrapped && startPos != zipDetails.centralDirOffset) {
+        if (!file.seek(zipDetails.centralDirOffset)) {
+          LOG_ERR("ZIP", "Failed to wrap central directory cursor");
+          lastCentralDirPosValid = false;
+          return false;
+        }
         wrapped = true;
         continue;
       }
       break;
     }
 
-    // If we've wrapped and reached our start position, stop
-    if (wrapped && entryStart >= startPos) {
-      break;
+    if (wrapped && entryStart >= startPos) break;
+    if (!readCentralDirectoryName(header, itemName)) return false;
+
+    if (header.nameLength < sizeof(itemName) && strcmp(itemName, filename) == 0) {
+      *fileStat = header.stat;
+      lastCentralDirPos = file.position();
+      lastCentralDirPosValid = true;
+      return true;
     }
-
-    file.seekCur(6);
-    file.read(&fileStat->method, 2);
-    file.seekCur(8);
-    file.read(&fileStat->compressedSize, 4);
-    file.read(&fileStat->uncompressedSize, 4);
-    uint16_t nameLen, m, k;
-    file.read(&nameLen, 2);
-    file.read(&m, 2);
-    file.read(&k, 2);
-    file.seekCur(8);
-    file.read(&fileStat->localHeaderOffset, 4);
-
-    if (nameLen < 256) {
-      file.read(itemName, nameLen);
-      itemName[nameLen] = '\0';
-
-      if (strcmp(itemName, filename) == 0) {
-        // Found it! Update cursor to next entry
-        file.seekCur(m + k);
-        lastCentralDirPos = file.position();
-        lastCentralDirPosValid = true;
-        found = true;
-        break;
-      }
-    } else {
-      // Name too long, skip it
-      file.seekCur(nameLen);
-    }
-
-    // Skip extra field + comment
-    file.seekCur(m + k);
   }
 
-  return found;
+  return false;
 }
 
 long ZipFile::getDataOffset(const FileStatSlim& fileStat) {
@@ -519,6 +539,47 @@ bool ZipFile::getInflatedFileSize(const char* filename, size_t* size) {
   return true;
 }
 
+int ZipFile::matchUncompressedSizes(const CentralDirectoryHeader& header, const char* name, const SizeTarget* targets,
+                                    const size_t targetCount, uint32_t* sizes, const size_t sizeCount) {
+  const uint64_t hash = fnvHash64(name, header.nameLength);
+  const SizeTarget key = {hash, header.nameLength, 0};
+  const SizeTarget* const targetEnd = targets + targetCount;
+  auto it = std::lower_bound(targets, targetEnd, key, [](const SizeTarget& a, const SizeTarget& b) {
+    return a.hash < b.hash || (a.hash == b.hash && a.len < b.len);
+  });
+
+  int matched = 0;
+  while (it != targetEnd && it->hash == hash && it->len == header.nameLength) {
+    if (it->index < sizeCount) {
+      sizes[it->index] = header.stat.uncompressedSize;
+      ++matched;
+    }
+    ++it;
+  }
+  return matched;
+}
+
+int ZipFile::matchEntryIdentities(const CentralDirectoryHeader& header, const char* name, const EntryTarget* targets,
+                                  const size_t targetCount, EntryIdentity* identities, const size_t identityCount) {
+  const uint64_t hash = fnvHash64(name, header.nameLength);
+  const EntryTarget key = {hash, header.nameLength, 0, nullptr};
+  const EntryTarget* const targetEnd = targets + targetCount;
+  auto it = std::lower_bound(targets, targetEnd, key, [](const EntryTarget& a, const EntryTarget& b) {
+    return a.hash < b.hash || (a.hash == b.hash && a.len < b.len);
+  });
+
+  int matched = 0;
+  while (it != targetEnd && it->hash == hash && it->len == header.nameLength) {
+    if (it->index < identityCount && it->path != nullptr && memcmp(it->path, name, header.nameLength) == 0 &&
+        it->path[header.nameLength] == '\0') {
+      identities[it->index] = {header.crc32, header.stat.compressedSize, header.stat.uncompressedSize, true};
+      ++matched;
+    }
+    ++it;
+  }
+  return matched;
+}
+
 int ZipFile::fillUncompressedSizes(const SizeTarget* targets, const size_t targetCount, uint32_t* sizes,
                                    const size_t sizeCount) {
   if (targets == nullptr || sizes == nullptr || targetCount == 0) {
@@ -528,62 +589,19 @@ int ZipFile::fillUncompressedSizes(const SizeTarget* targets, const size_t targe
   const ScopedOpenClose zip{*this};
   if (!zip) return 0;
 
-  if (!loadZipDetails()) return 0;
-
-  file.seek(zipDetails.centralDirOffset);
+  if (!seekCentralDirectory()) return 0;
 
   int matched = 0;
   const auto expectedMatches = static_cast<int>(targetCount);
-  const SizeTarget* const targetEnd = targets + targetCount;
-  uint32_t sig;
   char itemName[256];
 
-  while (file.available()) {
-    file.read(&sig, 4);
-    if (sig != 0x02014b50) break;
+  while (file.available() && matched < expectedMatches) {
+    CentralDirectoryHeader header;
+    if (readCentralDirectoryHeader(header) != CentralDirectoryReadStatus::Entry) break;
+    if (!readCentralDirectoryName(header, itemName)) break;
+    if (header.nameLength >= sizeof(itemName)) continue;
 
-    file.seekCur(6);
-    uint16_t method;
-    file.read(&method, 2);
-    file.seekCur(8);
-    uint32_t compressedSize, uncompressedSize;
-    file.read(&compressedSize, 4);
-    file.read(&uncompressedSize, 4);
-    uint16_t nameLen, m, k;
-    file.read(&nameLen, 2);
-    file.read(&m, 2);
-    file.read(&k, 2);
-    file.seekCur(8);
-    uint32_t localHeaderOffset;
-    file.read(&localHeaderOffset, 4);
-
-    if (nameLen < 256) {
-      file.read(itemName, nameLen);
-      itemName[nameLen] = '\0';
-
-      uint64_t hash = fnvHash64(itemName, nameLen);
-      SizeTarget key = {hash, nameLen, 0};
-
-      auto it = std::lower_bound(targets, targetEnd, key, [](const SizeTarget& a, const SizeTarget& b) {
-        return a.hash < b.hash || (a.hash == b.hash && a.len < b.len);
-      });
-
-      while (it != targetEnd && it->hash == hash && it->len == nameLen) {
-        if (it->index < sizeCount) {
-          sizes[it->index] = uncompressedSize;
-          matched++;
-        }
-        ++it;
-      }
-
-      if (matched >= expectedMatches) {
-        break;
-      }
-    } else {
-      file.seekCur(nameLen);
-    }
-
-    file.seekCur(m + k);
+    matched += matchUncompressedSizes(header, itemName, targets, targetCount, sizes, sizeCount);
   }
 
   return matched;
@@ -598,60 +616,19 @@ int ZipFile::fillEntryIdentities(const EntryTarget* targets, const size_t target
   const ScopedOpenClose zip{*this};
   if (!zip) return 0;
 
-  if (!loadZipDetails()) return 0;
-
-  file.seek(zipDetails.centralDirOffset);
+  if (!seekCentralDirectory()) return 0;
 
   int matched = 0;
   const auto expectedMatches = static_cast<int>(targetCount);
-  const EntryTarget* const targetEnd = targets + targetCount;
-  uint32_t sig;
   char itemName[256];
 
-  while (file.available()) {
-    file.read(&sig, 4);
-    if (sig != 0x02014b50) break;
+  while (file.available() && matched < expectedMatches) {
+    CentralDirectoryHeader header;
+    if (readCentralDirectoryHeader(header) != CentralDirectoryReadStatus::Entry) break;
+    if (!readCentralDirectoryName(header, itemName)) break;
+    if (header.nameLength >= sizeof(itemName)) continue;
 
-    // Skip versions, flags, compression method, and modification time/date.
-    file.seekCur(12);
-    EntryIdentity identity;
-    file.read(&identity.crc32, 4);
-    file.read(&identity.compressedSize, 4);
-    file.read(&identity.uncompressedSize, 4);
-    uint16_t nameLen, extraLen, commentLen;
-    file.read(&nameLen, 2);
-    file.read(&extraLen, 2);
-    file.read(&commentLen, 2);
-    file.seekCur(12);
-
-    if (nameLen < sizeof(itemName)) {
-      file.read(itemName, nameLen);
-      itemName[nameLen] = '\0';
-
-      const uint64_t hash = fnvHash64(itemName, nameLen);
-      const EntryTarget key = {hash, nameLen, 0, nullptr};
-      auto it = std::lower_bound(targets, targetEnd, key, [](const EntryTarget& a, const EntryTarget& b) {
-        return a.hash < b.hash || (a.hash == b.hash && a.len < b.len);
-      });
-
-      while (it != targetEnd && it->hash == hash && it->len == nameLen) {
-        if (it->index < identityCount && it->path != nullptr && memcmp(it->path, itemName, nameLen) == 0 &&
-            it->path[nameLen] == '\0') {
-          identity.found = true;
-          identities[it->index] = identity;
-          ++matched;
-        }
-        ++it;
-      }
-
-      if (matched >= expectedMatches) {
-        break;
-      }
-    } else {
-      file.seekCur(nameLen);
-    }
-
-    file.seekCur(extraLen + commentLen);
+    matched += matchEntryIdentities(header, itemName, targets, targetCount, identities, identityCount);
   }
 
   return matched;

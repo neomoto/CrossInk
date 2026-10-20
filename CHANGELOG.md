@@ -20,6 +20,16 @@
   discarded height calculations, narrowing checked kerning searches, and stopping
   text-fit probes after their measured bounds overflow. Preserve font fallback,
   truncation, wrapping, and visible geometry without adding persistent caches.
+- Decode monochrome UI glyphs by source-byte chunks and merge packed two-bit
+  glyph pixels into framebuffer-byte updates. Preserve orientation, clipping,
+  strip bands, and grayscale without adding runtime buffers or caches.
+- Use generated read-only ASCII kerning-class lookups for built-in fonts, with
+  unchanged Unicode, SD-font, and scalable-font fallbacks.
+- Read reused library metadata in one prefix traversal and ZIP central-directory
+  headers in one checked, bounded read instead of repeated tiny operations.
+- Reuse bounded EPUB/TXT layouts when switching viewports. Preserve the original
+  active EPUB filename for synchronization and recover legacy TXT byte anchors
+  before replacing their source index; progress and cache versions are unchanged.
 
 ### Fixed
 

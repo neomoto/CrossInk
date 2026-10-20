@@ -39,6 +39,7 @@ class TxtReaderActivity final : public Activity {
   std::vector<std::string> currentPageLines;
   int linesPerPage = 0;
   int viewportWidth = 0;
+  int viewportHeight = 0;
   bool initialized = false;
   std::optional<size_t> pendingOrientationOffset;
   std::optional<size_t> rotationReadingOffset;
@@ -60,14 +61,13 @@ class TxtReaderActivity final : public Activity {
 
   void initializeReader();
   bool loadPageAtOffset(size_t offset, std::vector<std::string>& outLines, size_t& nextOffset);
-  void buildPageIndex();
+  bool buildPageIndex();
   bool loadPageIndexCache();
-  void savePageIndexCache() const;
+  void savePageIndexCache(bool legacyMigrationComplete) const;
   bool saveProgress(int page);
   bool queueProgressSave();
   bool flushQueuedProgress();
   void saveProgressBeforeRestart();
-  void loadProgress();
   void toggleDarkMode();
   void toggleHomeButtonInReader();
   bool consumeLongPowerButtonRelease();

@@ -2145,6 +2145,25 @@ static const EpdFontGroup bitter_10_boldGroups[] = {
     { 17831, 77, 136, 2, 919 },
 };
 
+static const uint8_t bitter_10_boldKernAsciiClassIds[256] = {
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   1,   2,   0,   3,   0,   4,   2,   5,   0,   0,   0,   6,   7,   6,   8,
+      9,  10,  11,  12,  13,  14,  15,  16,  12,  17,  18,  18,   0,   0,   0,  19,
+     20,  21,  12,  22,  20,  23,  24,  25,  26,  26,  27,  28,  29,  26,  26,  20,
+     30,  31,  32,   3,  33,  27,  34,  35,  28,  36,  37,  38,  39,   0,   0,  40,
+      0,  41,  42,  43,  44,  45,  46,  47,  41,  44,  48,  49,  44,  41,  41,  42,
+     42,  50,  51,  52,  53,  54,  55,  55,  49,  56,  57,  58,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   1,   2,   0,   3,   0,   4,   2,   0,   5,   6,   0,   7,   8,   7,   9,
+     10,  11,  12,  13,  14,  15,  16,  17,   4,  18,  19,  19,   0,   0,   0,  20,
+     21,  22,  23,  21,  23,  23,  23,  21,  23,  23,  24,  23,  23,  23,  23,  21,
+     23,  21,  23,   3,  25,  26,  27,  27,  28,  29,  30,   0,  31,  32,   0,  33,
+      0,  34,  35,  36,  36,  36,  37,  38,  39,  37,  40,  39,  39,  37,  37,  36,
+     41,  36,  37,  42,  43,  44,  45,  45,  46,  47,  48,   0,  49,  50,   0,   0,
+};
+
 static const uint16_t bitter_10_boldKernLeftCodepoints[] = {
     0x0021, 0x0022, 0x0024, 0x0026, 0x0027, 0x0028, 0x002C, 0x002D, 0x002E, 0x002F, 0x0030, 0x0031,
     0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039, 0x003A, 0x003B, 0x003F, 0x0040,
@@ -3079,4 +3098,16 @@ static constexpr EpdFontData bitter_10_bold = {
     113,
     bitter_10_boldLigaturePairs,
     2,
+    nullptr,  // glyphMissHandler
+    nullptr,  // glyphMissCtx
+    nullptr,  // coverageHandler
+#if CROSSINK_SCALABLE_FONTS
+    nullptr,  // dynamicGlyphHandler
+    nullptr,  // bitmapHandler
+    nullptr,  // kerningHandler
+    nullptr,  // ligatureHandler
+    nullptr,  // sizeFamily
+    0,        // pointSize
+#endif
+    bitter_10_boldKernAsciiClassIds,
 };

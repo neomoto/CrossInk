@@ -614,27 +614,14 @@ bool findPrior(WalkState& st, const uint64_t pathHash, uint32_t& position, uint1
   const bool reuseSortKeys = reuseMetadata && st.previous->header().foldVersion == CLIX_FOLD_VERSION;
 
   if (reuseMetadata) {
-    if (!st.previous->readSourceAuthor(priorRecord, author)) {
-      st.failed = true;
-      return false;
-    }
-    if (!st.previous->readSeries(priorRecord, series) || !st.previous->readGenre(priorRecord, genre)) {
-      st.failed = true;
-      return false;
-    }
-    if (st.previous->header().formatVersion >= 6 &&
-        !st.previous->readSeriesPosition(priorRecord, entry.seriesPosition)) {
-      st.failed = true;
-      return false;
-    }
-    const bool hasBookTitle = st.previous->readTitle(priorRecord, title);
-    if (!hasBookTitle && st.previous->ioFailed()) {
+    if (!st.previous->readSourceMetadata(priorRecord, title, author, series, genre, entry.seriesPosition) ||
+        (title.empty() && st.previous->ioFailed())) {
       st.failed = true;
       return false;
     }
     entry.record = priorRecord;
     authorFromBook = !author.empty();
-    if (hasBookTitle) {
+    if (!title.empty()) {
       titleFromBook = true;
     } else {
       title = stemOf(name);

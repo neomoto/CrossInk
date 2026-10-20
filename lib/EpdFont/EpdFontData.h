@@ -239,6 +239,10 @@ typedef struct EpdFontData {
   const void* sizeFamily = nullptr;
   uint8_t pointSize = 0;
 #endif
+
+  /// Optional read-only class lookup for U+0000..U+007F: 128 left IDs followed
+  /// by 128 right IDs. Zero denotes no class; other codepoints use the maps above.
+  const uint8_t* kernAsciiClassIds = nullptr;
 } EpdFontData;
 
 namespace syntheticGlyph {

@@ -2158,6 +2158,25 @@ static const EpdFontGroup lexenddeca_16_boldGroups[] = {
     { 21425, 99, 312, 2, 699 },
 };
 
+static const uint8_t lexenddeca_16_boldKernAsciiClassIds[256] = {
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   1,   0,   2,   0,   3,   0,   4,   0,   5,   6,
+      7,   8,   9,  10,  11,  12,  13,  14,  15,  16,   0,   0,  17,   0,  18,  19,
+     20,  21,  22,  23,  24,  25,  26,  27,   0,  28,  29,  30,  31,   0,   0,  24,
+     32,  33,  34,  35,  36,  37,  38,  39,  40,  41,  42,  43,  44,   0,   0,  45,
+      0,  46,  47,  48,  49,  50,  51,  52,  53,  54,  55,  56,  57,  53,  53,  47,
+     47,  58,  59,  60,  61,  62,  63,  64,  65,  66,  67,  68,   0,  69,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   1,   0,   0,   0,   0,   2,   0,   0,   3,   4,   0,   5,   6,   7,   8,
+      9,  10,  11,   0,  12,   0,  13,  14,  15,  16,   0,   0,  17,   0,   0,  18,
+     19,  20,  21,  22,  21,  21,  21,  22,  21,  23,  24,  21,  21,  21,  21,  22,
+     21,  22,  21,  25,  26,  27,  28,  29,  30,  31,  32,  33,  34,  35,   0,  36,
+      0,  37,  38,  37,  37,  37,  39,  40,  38,   0,  41,  38,  38,  42,  42,  37,
+     43,  37,  42,  44,  45,  46,  47,  48,  49,  50,  51,  33,   0,  52,   0,   0,
+};
+
 static const uint16_t lexenddeca_16_boldKernLeftCodepoints[] = {
     0x0026, 0x0028, 0x002A, 0x002C, 0x002E, 0x002F, 0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035,
     0x0036, 0x0037, 0x0038, 0x0039, 0x003C, 0x003E, 0x003F, 0x0040, 0x0041, 0x0042, 0x0043, 0x0044,
@@ -2469,4 +2488,16 @@ static constexpr EpdFontData lexenddeca_16_bold = {
     82,
     lexenddeca_16_boldLigaturePairs,
     2,
+    nullptr,  // glyphMissHandler
+    nullptr,  // glyphMissCtx
+    nullptr,  // coverageHandler
+#if CROSSINK_SCALABLE_FONTS
+    nullptr,  // dynamicGlyphHandler
+    nullptr,  // bitmapHandler
+    nullptr,  // kerningHandler
+    nullptr,  // ligatureHandler
+    nullptr,  // sizeFamily
+    0,        // pointSize
+#endif
+    lexenddeca_16_boldKernAsciiClassIds,
 };

@@ -194,6 +194,11 @@ position first, and close any monitor before using the flasher.
 
 On first open of an EPUB, an **Indexing...** popup appears while the section cache is built in `.crosspoint/`.
 
+EPUB keeps the active layout at its original cache path and one alternate layout
+for reuse when rotating back. TXT keeps narrow and wide indexes separately.
+Both validate the full layout key before reuse; a first visit to a new geometry
+can still require reflow. See [Data and Cache](./data-cache.md) for file details.
+
 TXT layout caches rebuild automatically after a version change. Keep legacy TXT
 indexes until the reader upgrades their page-only bookmarks.
 

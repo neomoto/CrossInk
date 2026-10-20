@@ -103,7 +103,7 @@ static uint8_t lookupKernClassSplit(const uint16_t* codepoints, const uint8_t* c
   return (it != end && *it == target) ? classIds[it - codepoints] : 0;
 }
 
-static uint8_t lookupKernClass(const EpdKernClassEntry* entries, const uint16_t count, const uint32_t cp) {
+static uint8_t lookupKernClassPacked(const EpdKernClassEntry* entries, const uint16_t count, const uint32_t cp) {
   if (!entries || count == 0 || cp > 0xFFFF) {
     return 0;
   }
@@ -129,8 +129,39 @@ static uint8_t lookupKernClass(const EpdKernClassEntry* entries, const uint16_t 
   return 0;
 }
 
+static uint8_t lookupKernClassForSide(const EpdFontData* data, const uint32_t cp, const bool left) {
+  if (data->kernAsciiClassIds && cp < 128) {
+    return data->kernAsciiClassIds[(left ? 0 : 128) + cp];
+  }
+  // Built-in fonts carry the split arrays, SD-card fonts the packed ones; never both.
+  if (data->kernLeftCodepoints) {
+    return left ? lookupKernClassSplit(data->kernLeftCodepoints, data->kernLeftClassIds, data->kernLeftEntryCount, cp)
+                : lookupKernClassSplit(data->kernRightCodepoints, data->kernRightClassIds, data->kernRightEntryCount,
+                                       cp);
+  }
+  return left ? lookupKernClassPacked(data->kernLeftClasses, data->kernLeftEntryCount, cp)
+              : lookupKernClassPacked(data->kernRightClasses, data->kernRightEntryCount, cp);
+}
+
+static int8_t lookupSparseKerning(const EpdFontData* data, const uint8_t lc, const uint8_t rc) {
+  // Built-in fonts use a sparse matrix. Rows are short and ordered by column,
+  // so a forward scan avoids the flash and branch cost of a binary search.
+  if (!data->kernSparseCols || !data->kernSparseValues || lc > data->kernLeftClassCount ||
+      rc > data->kernRightClassCount) {
+    return 0;
+  }
+  const uint16_t begin = data->kernRowOffsets[lc - 1];
+  const uint16_t end = data->kernRowOffsets[lc];
+  const auto target = static_cast<uint8_t>(rc - 1);
+  for (uint16_t i = begin; i < end; i++) {
+    if (data->kernSparseCols[i] == target) return data->kernSparseValues[i];
+    if (data->kernSparseCols[i] > target) break;
+  }
+  return 0;
+}
+
 int8_t EpdFont::getKerning(const uint32_t leftCp, const uint32_t rightCp) const {
-  if (utf8IsCjkBreakable(leftCp) || utf8IsCjkBreakable(rightCp)) {
+  if ((leftCp | rightCp) >= 128 && (utf8IsCjkBreakable(leftCp) || utf8IsCjkBreakable(rightCp))) {
     return 0;
   }
 #if CROSSINK_SCALABLE_FONTS
@@ -139,36 +170,11 @@ int8_t EpdFont::getKerning(const uint32_t leftCp, const uint32_t rightCp) const 
   if (!data->kernMatrix && !data->kernRowOffsets) {
     return 0;
   }
-  if (!data->kernLeftClasses && !data->kernLeftCodepoints) {
-    return 0;
-  }
-  // Built-in fonts carry the split arrays, SD-card fonts the packed ones; never both.
-  const bool split = data->kernLeftCodepoints != nullptr;
-  const uint8_t lc =
-      split ? lookupKernClassSplit(data->kernLeftCodepoints, data->kernLeftClassIds, data->kernLeftEntryCount, leftCp)
-            : lookupKernClass(data->kernLeftClasses, data->kernLeftEntryCount, leftCp);
+  const uint8_t lc = lookupKernClassForSide(data, leftCp, true);
   if (lc == 0) return 0;
-  const uint8_t rc = split ? lookupKernClassSplit(data->kernRightCodepoints, data->kernRightClassIds,
-                                                  data->kernRightEntryCount, rightCp)
-                           : lookupKernClass(data->kernRightClasses, data->kernRightEntryCount, rightCp);
+  const uint8_t rc = lookupKernClassForSide(data, rightCp, false);
   if (rc == 0) return 0;
-
-  // Built-in fonts use a sparse matrix. Rows are short and ordered by column,
-  // so a forward scan avoids the flash and branch cost of a binary search.
-  if (data->kernRowOffsets) {
-    if (!data->kernSparseCols || !data->kernSparseValues || lc > data->kernLeftClassCount ||
-        rc > data->kernRightClassCount) {
-      return 0;
-    }
-    const uint16_t begin = data->kernRowOffsets[lc - 1];
-    const uint16_t end = data->kernRowOffsets[lc];
-    const auto target = static_cast<uint8_t>(rc - 1);
-    for (uint16_t i = begin; i < end; i++) {
-      if (data->kernSparseCols[i] == target) return data->kernSparseValues[i];
-      if (data->kernSparseCols[i] > target) break;
-    }
-    return 0;
-  }
+  if (data->kernRowOffsets) return lookupSparseKerning(data, lc, rc);
 
   // SD-card fonts retain the dense representation mapped from .cpfont files.
   return data->kernMatrix[(lc - 1) * data->kernRightClassCount + (rc - 1)];

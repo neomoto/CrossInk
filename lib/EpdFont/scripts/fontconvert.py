@@ -14,6 +14,18 @@ if hasattr(sys.stdout, 'reconfigure'):
 
 # Originally from https://github.com/vroland/epdiy
 
+def emit_ascii_kerning_classes(font_name, left_entries, right_entries):
+    classes = [0] * 256
+    for offset, entries in ((0, left_entries), (128, right_entries)):
+        # Preserve the first exact class if a legacy map contains duplicate keys.
+        for cp, class_id in reversed(entries):
+            if 0 <= cp < 128:
+                classes[offset + cp] = class_id
+    print(f"static const uint8_t {font_name}KernAsciiClassIds[256] = {{")
+    for start in range(0, len(classes), 16):
+        print("    " + ", ".join(f"{value:3d}" for value in classes[start:start + 16]) + ",")
+    print("};\n")
+
 parser = argparse.ArgumentParser(description="Generate a header file from a font to be used with epdiy.")
 parser.add_argument("name", action="store", help="name of the font.")
 parser.add_argument("size", type=int, help="font size to use.")
@@ -1051,6 +1063,7 @@ if compress:
     print("};\n")
 
 if kern_map:
+    emit_ascii_kerning_classes(font_name, kern_left_classes, kern_right_classes)
     for side, entries in (("Left", kern_left_classes), ("Right", kern_right_classes)):
         print(f"static const uint16_t {font_name}Kern{side}Codepoints[] = {{")
         for chunk in chunks([cp for cp, _ in entries], 12):
@@ -1147,4 +1160,17 @@ if ligature_pairs:
 else:
     print(f"    nullptr,")
     print(f"    0,")
+if kern_map:
+    print("    nullptr,  // glyphMissHandler")
+    print("    nullptr,  // glyphMissCtx")
+    print("    nullptr,  // coverageHandler")
+    print("#if CROSSINK_SCALABLE_FONTS")
+    print("    nullptr,  // dynamicGlyphHandler")
+    print("    nullptr,  // bitmapHandler")
+    print("    nullptr,  // kerningHandler")
+    print("    nullptr,  // ligatureHandler")
+    print("    nullptr,  // sizeFamily")
+    print("    0,        // pointSize")
+    print("#endif")
+    print(f"    {font_name}KernAsciiClassIds,")
 print("};")

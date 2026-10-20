@@ -16,11 +16,13 @@ using oflag_t = uint8_t;
 inline constexpr oflag_t O_RDONLY = 0;
 inline constexpr oflag_t O_RDWR = 1;
 
+inline constexpr oflag_t O_WRONLY = 2;
 struct HostFileData {
   std::vector<uint8_t> bytes;
   size_t reads = 0;
   size_t seeks = 0;
   size_t failAt = std::numeric_limits<size_t>::max();
+  bool failNextRead = false;
 };
 
 class HalFile : public Print {
@@ -37,6 +39,10 @@ class HalFile : public Print {
   int read(void* output, const size_t length) {
     if (!data_) return 0;
     ++data_->reads;
+    if (data_->failNextRead) {
+      data_->failNextRead = false;
+      return 0;
+    }
     const size_t readable = std::min(length, data_->bytes.size() - std::min(cursor_, data_->bytes.size()));
     if (readable > 0) std::copy_n(data_->bytes.data() + cursor_, readable, static_cast<uint8_t*>(output));
     cursor_ += readable;
@@ -97,6 +103,7 @@ class HalStorage {
   bool failWrite = false;
   std::string failRenameFrom;
   size_t reads(const std::string& path) const { return files_.at(path)->reads; }
+  size_t fileCount() const { return files_.size(); }
   size_t seeks(const std::string& path) const { return files_.at(path)->seeks; }
   bool mkdir(const char*, bool = true) { return true; }
   bool exists(const char* path) const { return files_.contains(path); }
@@ -138,6 +145,7 @@ class HalStorage {
   }
 
   void failWritesAt(const std::string& path, size_t offset) { files_.at(path)->failAt = offset; }
+  void failNextRead(const std::string& path) { files_.at(path)->failNextRead = true; }
   const std::vector<uint8_t>& bytes(const std::string& path) const { return files_.at(path)->bytes; }
   void put(const std::string& path, std::vector<uint8_t> bytes) {
     auto data = std::make_shared<HostFileData>();

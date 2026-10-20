@@ -3970,6 +3970,25 @@ static const EpdUnicodeInterval inter_12_regularIntervals[] = {
     { 0xFE80, 0xFEFC, 0x4B7 },
 };
 
+static const uint8_t inter_12_regularKernAsciiClassIds[256] = {
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   1,   0,   2,   3,   4,   1,   5,   6,   7,   8,   9,   8,   9,  10,
+     11,  12,  13,  14,  15,  16,  17,  18,  14,  11,  19,  19,   0,  20,  21,  22,
+     23,  24,  25,  26,  23,  27,  28,  29,  12,  12,  30,  31,  32,  12,  12,  23,
+     33,  23,  34,   2,  35,  30,  36,  37,  38,  39,  40,  41,  42,   6,   7,  43,
+      0,  44,  45,  45,  12,  45,  46,  47,  44,  48,  48,  49,  12,  44,  44,  45,
+     45,  47,  50,  51,  52,  53,  54,  55,  56,  54,  57,   5,  12,   6,  58,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   1,   2,   3,   4,   5,   1,   0,   6,   7,   8,   9,  10,  11,  12,
+     13,  14,  15,  16,  17,  18,  13,  19,  20,  21,  22,  22,  23,  24,   0,  25,
+     26,  27,  28,  29,  28,  28,  28,  29,  28,  28,  30,  28,  28,  28,  28,  29,
+     28,  29,  28,   3,  31,  32,  33,  34,  35,  36,  37,   0,  33,   6,  38,  39,
+      0,  40,  28,  41,  41,  41,  42,  41,  28,  43,  44,  28,  28,  45,  45,  41,
+     45,  41,  45,  46,  47,  48,  49,  50,  51,  49,  52,   0,  28,   6,  53,   0,
+};
+
 static const uint16_t inter_12_regularKernLeftCodepoints[] = {
     0x0022, 0x0024, 0x0025, 0x0026, 0x0027, 0x0028, 0x0029, 0x002A, 0x002B, 0x002C, 0x002D, 0x002E,
     0x002F, 0x0030, 0x0031, 0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039, 0x003A,
@@ -4609,4 +4628,16 @@ static constexpr EpdFontData inter_12_regular = {
     143,
     nullptr,
     0,
+    nullptr,  // glyphMissHandler
+    nullptr,  // glyphMissCtx
+    nullptr,  // coverageHandler
+#if CROSSINK_SCALABLE_FONTS
+    nullptr,  // dynamicGlyphHandler
+    nullptr,  // bitmapHandler
+    nullptr,  // kerningHandler
+    nullptr,  // ligatureHandler
+    nullptr,  // sizeFamily
+    0,        // pointSize
+#endif
+    inter_12_regularKernAsciiClassIds,
 };

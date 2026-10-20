@@ -1,6 +1,7 @@
 #pragma once
 #include <HalStorage.h>
 #include <InflateStream.h>
+#include <Memory.h>
 
 #include <memory>
 #include <string>
@@ -109,6 +110,25 @@ class ZipFile {
   uint32_t lastCentralDirPos = 0;
   bool lastCentralDirPosValid = false;
 
+  struct CentralDirectoryHeader {
+    FileStatSlim stat;
+    uint32_t crc32;
+    uint16_t nameLength;
+    uint16_t extraLength;
+    uint16_t commentLength;
+  };
+
+  enum class CentralDirectoryReadStatus { Entry, End, Error };
+
+  bool seekCentralDirectory();
+  CentralDirectoryReadStatus readCentralDirectoryHeader(CentralDirectoryHeader& header);
+  bool readCentralDirectoryName(const CentralDirectoryHeader& header, char (&name)[256]);
+  bool findFileStatSlim(const char* filename, FileStatSlim* fileStat);
+  static int matchUncompressedSizes(const CentralDirectoryHeader& header, const char* name, const SizeTarget* targets,
+                                    size_t targetCount, uint32_t* sizes, size_t sizeCount);
+  static int matchEntryIdentities(const CentralDirectoryHeader& header, const char* name, const EntryTarget* targets,
+                                  size_t targetCount, EntryIdentity* identities, size_t identityCount);
+
   bool loadFileStatSlim(const char* filename, FileStatSlim* fileStat);
   long getDataOffset(const FileStatSlim& fileStat);
   bool loadZipDetails();
@@ -152,45 +172,33 @@ class ZipFile {
       return false;
     }
 
-    if (!loadZipDetails()) {
-      if (!wasOpen) {
-        close();
-      }
+    const ScopedCleanup closeAfterEnumeration{[this, wasOpen] {
+      if (!wasOpen) close();
+    }};
+    if (!seekCentralDirectory()) {
       return false;
     }
 
-    file.seek(zipDetails.centralDirOffset);
-
-    uint32_t sig;
     char itemName[256];
+    bool success = true;
 
     while (file.available()) {
-      file.read(&sig, 4);
-      if (sig != 0x02014b50) {
+      CentralDirectoryHeader header;
+      const auto status = readCentralDirectoryHeader(header);
+      if (status != CentralDirectoryReadStatus::Entry) {
+        success = status == CentralDirectoryReadStatus::End;
+        break;
+      }
+      if (!readCentralDirectoryName(header, itemName)) {
+        success = false;
         break;
       }
 
-      file.seekCur(24);
-      uint16_t nameLen, m, k;
-      file.read(&nameLen, 2);
-      file.read(&m, 2);
-      file.read(&k, 2);
-      file.seekCur(12);
-
-      if (nameLen < sizeof(itemName)) {
-        file.read(itemName, nameLen);
-        itemName[nameLen] = '\0';
-        callback(std::string_view{itemName, nameLen});
-      } else {
-        file.seekCur(nameLen);
+      if (header.nameLength < sizeof(itemName)) {
+        callback(std::string_view{itemName, header.nameLength});
       }
-
-      file.seekCur(m + k);
     }
 
-    if (!wasOpen) {
-      close();
-    }
-    return true;
+    return success;
   }
 };

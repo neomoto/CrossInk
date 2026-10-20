@@ -28,6 +28,10 @@
 
 #include "AppCapabilities.h"
 
+#if defined(SIMULATOR) && defined(CROSSPOINT_SIM_PERF_TRACE_API)
+#include <SimulatorPerfTrace.h>
+#endif
+
 #ifdef SIMULATOR
 using esp_reset_reason_t = int;
 using esp_sleep_wakeup_cause_t = int;
@@ -1628,6 +1632,9 @@ void loop() {
   // hardware input frame. A shortcut may open an activity that never queries
   // the originating button, so its one-shot release guard must still expire.
   mappedInputManager.update();
+#if defined(SIMULATOR) && defined(CROSSPOINT_SIM_PERF_TRACE_API)
+  SimulatorPerfTrace::observeButtons(gpio);
+#endif
 #ifdef SIMULATOR
   simulatorHomeKeyInput.update();
 #endif

@@ -46,14 +46,32 @@ The main data directory is `.crosspoint` on the SD card. It stores render caches
 │   ├── book.bin            # Book metadata, spine, table of contents, etc.
 │   ├── css_rules.cache     # Parsed CSS rules
 │   └── sections/           # Pre-rendered chapter/page layout data
-│       ├── 0.bin
+│       ├── 0.bin           # Last successfully activated layout
+│       ├── 0.bin.alt.bin   # One retained alternate layout
 │       ├── 1.bin
 │       └── ...
 ├── xtc_12471232/           # XTC progress and generated cover/thumb images
-└── txt_12471232/           # TXT progress, page index, and generated cover image
+└── txt_12471232/           # TXT progress, page indexes, and generated cover image
+    ├── index.bin          # Narrow viewport, or retained legacy v4 index
+    ├── index.wide.bin     # Wide viewport
+    └── progress.bin       # Existing six-byte page/source-offset record
 ```
 
 Four-tone sleep covers use separate `_absolute.bmp` files so older cover shading is not reused. These are generated on demand for supported displays; TXT/Markdown JPG covers also use a separate `cover_absolute.bmp`. Existing cover and thumbnail caches remain available, and no manual cache reset is needed.
+
+## EPUB Layout Reuse
+
+Each spine and existing preview/render-mode suffix keeps the original `.bin`
+as its active layout plus one fixed `.alt.bin` alternative. Both use the same
+existing header and full render-spec validation. Returning to a retained layout
+activates it without rebuilding the chapter.
+
+The original filename remains the last successfully activated layout, so
+constructor-only synchronization readers keep their existing count and anchor
+semantics. Activation and build promotion preserve the previous layout through
+bounded backup/rollback paths. Partial-cache watermarks, progress, bookmarks,
+and per-book reader settings keep their existing formats. No second layout is
+retained in RAM.
 
 ## TXT Layout and Bookmarks
 
@@ -65,6 +83,13 @@ it replaces that index. It stores and syncs the source-byte offset in the existi
 six-byte progress format. If that update fails, the reader keeps the version 4
 index. The new layout remains in RAM. Existing six-byte progress records need no
 migration.
+
+Narrow and wide TXT viewports retain separate bounded indexes. Each slot still
+validates the source size, viewport, font, lines per page, margins, and alignment before
+reuse. Switching back can reuse the previous pagination without rebuilding it.
+Legacy page-only bookmarks always resolve through the original `index.bin`,
+never a differently paginated wide slot. Progress writes remain six bytes;
+there is no additional per-save metadata file.
 
 ## Clearing Cache Data
 

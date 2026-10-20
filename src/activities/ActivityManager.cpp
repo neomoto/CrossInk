@@ -19,6 +19,10 @@
 #include <cstdlib>
 #endif
 
+#if defined(SIMULATOR) && defined(CROSSPOINT_SIM_PERF_TRACE_API)
+#include <SimulatorPerfTrace.h>
+#endif
+
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
 #include "OpdsServerStore.h"
@@ -477,10 +481,14 @@ void ActivityManager::renderTaskTrampoline(void* param) {
 
 void ActivityManager::renderTaskLoop() {
 #ifdef SIMULATOR
-  const bool traceRender = std::getenv("CROSSINK_SIMULATOR_PERF_TRACE") != nullptr;
+  const bool traceRenderDuration = std::getenv("CROSSINK_SIMULATOR_PERF_TRACE") != nullptr;
 #endif
   while (true) {
+#if defined(SIMULATOR) && defined(CROSSPOINT_SIM_PERF_TRACE_API)
+    const auto traceNotifications = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+#else
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+#endif
     // Acquire the lock before reading currentActivity to avoid a TOCTOU race
     // where the main task deletes the activity between the null-check and render().
     RenderLock lock;
@@ -491,13 +499,22 @@ void ActivityManager::renderTaskLoop() {
       // Apply Night Mode to each activity's normal-polarity frame. SleepActivity
       // preserves it only for Quick Resume and clears it for other sleep screens.
       display.setInverted(SETTINGS.screenInverted != 0);
+#if defined(SIMULATOR) && defined(CROSSPOINT_SIM_PERF_TRACE_API)
+      const auto traceRender = SimulatorPerfTrace::beginRender(currentActivity->name.c_str(), traceNotifications);
+#endif
 #ifdef SIMULATOR
-      const auto renderStartedUs = traceRender ? micros() : 0;
+      const auto renderStartedUs = traceRenderDuration ? micros() : 0;
 #endif
       currentActivity->render(std::move(lock));
 #ifdef SIMULATOR
-      if (traceRender) {
-        LOG_INF("PERF", "render_us=%lu", static_cast<unsigned long>(micros() - renderStartedUs));
+      const auto renderElapsedUs = traceRenderDuration ? micros() - renderStartedUs : 0;
+#endif
+#if defined(SIMULATOR) && defined(CROSSPOINT_SIM_PERF_TRACE_API)
+      SimulatorPerfTrace::endRender(traceRender);
+#endif
+#ifdef SIMULATOR
+      if (traceRenderDuration) {
+        LOG_INF("PERF", "render_us=%lu", static_cast<unsigned long>(renderElapsedUs));
       }
 #endif
       restoredActivityNeedsRender = false;
@@ -1320,11 +1337,17 @@ ScreenshotInfo ActivityManager::getScreenshotInfo() const {
 void ActivityManager::requestUpdate(bool immediate) {
   if (immediate) {
     if (renderTaskHandle) {
+#if defined(SIMULATOR) && defined(CROSSPOINT_SIM_PERF_TRACE_API)
+      SimulatorPerfTrace::requestUpdate("immediate");
+#endif
       xTaskNotify(renderTaskHandle, 1, eIncrement);
     }
   } else {
     // Deferring the update until current loop is finished
     // This is to avoid multiple updates being requested in the same loop
+#if defined(SIMULATOR) && defined(CROSSPOINT_SIM_PERF_TRACE_API)
+    SimulatorPerfTrace::requestUpdate("deferred");
+#endif
     requestedUpdate = true;
   }
 }
@@ -1361,6 +1384,9 @@ RequestUpdateResult ActivityManager::requestUpdateAndWait() {
     return RequestUpdateResult::Rejected;
   }
 
+#if defined(SIMULATOR) && defined(CROSSPOINT_SIM_PERF_TRACE_API)
+  SimulatorPerfTrace::requestUpdate("sync");
+#endif
   xTaskNotify(renderTaskHandle, 1, eIncrement);
   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   return RequestUpdateResult::Rendered;

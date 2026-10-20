@@ -104,6 +104,11 @@ class LibraryIndexFile {
   bool readGenre(const ClixRecord& record, std::string& out);
   // V6 sortable signed float bits; UINT32_MAX means no usable order.
   bool readSeriesPosition(const ClixRecord& record, uint32_t& out);
+  // Source metadata for reconciliation, read in one prefix walk into the
+  // caller's existing strings. Empty fields are valid, including a title that
+  // needs the filename fallback. V2 has no series/genre; pre-V6 has no position.
+  bool readSourceMetadata(const ClixRecord& record, std::string& title, std::string& sourceAuthor, std::string& series,
+                          std::string& genre, uint32_t& seriesPosition);
 
   // Absolute path of the book, rebuilt from its folder record.
   bool readPath(const ClixRecord& record, std::string& out);
@@ -116,6 +121,9 @@ class LibraryIndexFile {
   bool openImpl(const char* path, bool acceptStaleFold);
   bool readAt(uint32_t offset, void* dst, size_t len);
   bool readBlobField(const ClixRecord& record, uint8_t field, std::string& out);
+  bool readBlobFieldAt(uint32_t& at, std::string* out);
+  bool readBlobFields(const ClixRecord& record, std::string* const* fields, uint8_t count,
+                      uint32_t* seriesPosition = nullptr);
 
   HalFile file;
   ClixHeader head{};

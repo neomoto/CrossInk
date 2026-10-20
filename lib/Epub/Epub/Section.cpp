@@ -10,6 +10,9 @@
 #include <MemoryBudget.h>
 #include <Serialization.h>
 
+#include <array>
+#include <cstring>
+
 #include "Epub/ReferencePageNavigation.h"
 #include "Epub/css/CssParser.h"
 #include "Page.h"
@@ -43,6 +46,12 @@ constexpr uint32_t HEADER_SIZE =
     sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(bool) + sizeof(bool) + sizeof(uint8_t) +
     sizeof(bool) + sizeof(bool) + sizeof(uint8_t) + sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint32_t) +
     sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t);
+constexpr size_t SECTION_SPEC_OFFSET = sizeof(SECTION_CACHE_MAGIC) + sizeof(SECTION_FILE_VERSION);
+// Compare only serialized rendering fields, excluding page counts, image
+// totals and LUT offsets that change as the same layout's partial grows.
+constexpr size_t SECTION_SPEC_BYTES = HEADER_SIZE - SECTION_SPEC_OFFSET - sizeof(uint16_t) - 6 * sizeof(uint32_t);
+using SerializedSectionSpec = std::array<uint8_t, SECTION_SPEC_BYTES>;
+constexpr char SECTION_ALTERNATE_SUFFIX[] = ".alt.bin";
 constexpr size_t SECTION_HTML_STREAM_CHUNK_SIZE = 8192;
 constexpr size_t LOW_MEMORY_SECTION_HTML_STREAM_CHUNK_SIZE = 1024;
 
@@ -69,38 +78,101 @@ size_t sectionHtmlStreamChunkSize(const bool preview) {
 
 std::string sectionBackupPath(const std::string& filePath) { return filePath + ".bak"; }
 
-void recoverSectionCacheBackup(const std::string& filePath) {
-  const std::string backupPath = sectionBackupPath(filePath);
-  if (!Storage.exists(backupPath.c_str())) return;
+enum class CacheSpecRead { Valid, Invalid, ReadFailure };
 
-  if (Storage.exists(filePath.c_str())) {
-    Storage.remove(backupPath.c_str());
-    return;
+CacheSpecRead readSectionCacheSpec(const std::string& path, SerializedSectionSpec& spec) {
+  HalFile input;
+  if (!Storage.openFileForRead("SCT", path, input)) return CacheSpecRead::ReadFailure;
+  if (input.size() < HEADER_SIZE) {
+    input.close();
+    return CacheSpecRead::Invalid;
   }
+  uint8_t header[HEADER_SIZE];
+  const bool read = input.read(header, sizeof(header)) == static_cast<int>(sizeof(header));
+  input.close();
+  if (!read) return CacheSpecRead::ReadFailure;
+  uint32_t magic = 0;
+  std::memcpy(&magic, header, sizeof(magic));
+  const uint8_t version = header[sizeof(magic)];
+  if (magic != SECTION_CACHE_MAGIC || (version != SECTION_FILE_VERSION && version != SECTION_FILE_PARTIAL_VERSION)) {
+    return CacheSpecRead::Invalid;
+  }
+  std::memcpy(spec.data(), header + SECTION_SPEC_OFFSET, spec.size());
+  return CacheSpecRead::Valid;
+}
 
+bool restoreInvalidActiveSectionCache(const std::string& filePath, const std::string& backupPath,
+                                      const CacheSpecRead previous) {
+  switch (previous) {
+    case CacheSpecRead::ReadFailure:
+      return false;
+    case CacheSpecRead::Invalid:
+      return Storage.remove(backupPath.c_str());
+    case CacheSpecRead::Valid:
+      return Storage.remove(filePath.c_str()) && Storage.rename(backupPath.c_str(), filePath.c_str());
+  }
+  return false;
+}
+
+bool retainPreviousSectionCache(const std::string& filePath, const std::string& backupPath,
+                                const bool allowActiveRollback) {
+  SerializedSectionSpec activeSpec;
+  SerializedSectionSpec previousSpec;
+  const auto active = readSectionCacheSpec(filePath, activeSpec);
+  const auto previous = readSectionCacheSpec(backupPath, previousSpec);
+  if (active == CacheSpecRead::ReadFailure || previous == CacheSpecRead::ReadFailure) return false;
+  if (active == CacheSpecRead::Invalid) {
+    return allowActiveRollback && restoreInvalidActiveSectionCache(filePath, backupPath, previous);
+  }
+  if (previous == CacheSpecRead::Invalid || activeSpec == previousSpec) {
+    // Same-spec partial extensions supersede their old watermark, not the
+    // other geometry. Unsupported old formats are not reusable alternates.
+    return Storage.remove(backupPath.c_str());
+  }
+  const std::string alternatePath = filePath + SECTION_ALTERNATE_SUFFIX;
+  if (Storage.exists(alternatePath.c_str()) && !Storage.remove(alternatePath.c_str())) return false;
+  return Storage.rename(backupPath.c_str(), alternatePath.c_str());
+}
+
+bool recoverSectionCacheBackup(const std::string& filePath) {
+  const std::string backupPath = sectionBackupPath(filePath);
+  if (!Storage.exists(backupPath.c_str())) return true;
+  if (Storage.exists(filePath.c_str())) {
+    if (retainPreviousSectionCache(filePath, backupPath, true)) return true;
+    LOG_ERR("SCT", "Failed to retain previous section layout: %s", filePath.c_str());
+    return false;
+  }
   if (Storage.rename(backupPath.c_str(), filePath.c_str())) {
     LOG_INF("SCT", "Recovered section cache backup: %s", filePath.c_str());
-  } else {
-    LOG_ERR("SCT", "Failed to recover section cache backup: %s", filePath.c_str());
+    return true;
   }
+  LOG_ERR("SCT", "Failed to recover section cache backup: %s", filePath.c_str());
+  return false;
 }
 
 bool promoteSectionCache(const std::string& tmpPath, const std::string& filePath) {
-  recoverSectionCacheBackup(filePath);
+  const std::string backupPath = sectionBackupPath(filePath);
+  // Recovery must finish before a candidate is validated. Never mutate that
+  // candidate through another recovery pass immediately before activation.
+  if (Storage.exists(backupPath.c_str())) {
+    LOG_ERR("SCT", "Cannot promote section cache with unresolved backup");
+    return false;
+  }
   if (!Storage.exists(filePath.c_str())) {
     return Storage.rename(tmpPath.c_str(), filePath.c_str());
   }
-
-  const std::string backupPath = sectionBackupPath(filePath);
   if (!Storage.rename(filePath.c_str(), backupPath.c_str())) {
     LOG_ERR("SCT", "Failed to preserve old section cache before replacement");
     return false;
   }
   if (Storage.rename(tmpPath.c_str(), filePath.c_str())) {
-    Storage.remove(backupPath.c_str());
+    // Activation has committed. Retention may be deferred, but must never
+    // roll A back to the old layout while reporting a successful promotion.
+    if (!retainPreviousSectionCache(filePath, backupPath, false)) {
+      LOG_ERR("SCT", "Previous section layout retention deferred");
+    }
     return true;
   }
-
   LOG_ERR("SCT", "Failed to promote section cache; restoring previous cache");
   if (!Storage.rename(backupPath.c_str(), filePath.c_str())) {
     LOG_ERR("SCT", "Failed to restore section cache backup");
@@ -128,6 +200,22 @@ Section::Section(Epub& epub, const int spineIndex, GfxRenderer& renderer, const 
 // persists the pages already laid out as a partial .bin instead of discarding them
 // (no-op once a build has completed or never started).
 Section::~Section() { suspendBuild(); }
+
+bool Section::prepareBuild(const ReaderRenderSpec& spec) {
+  if (build_ || !activeBuildTmpSectionPath_.empty()) {
+    LOG_ERR("SCT", "Cannot start a section build during an active build");
+    return false;
+  }
+  if (!recoverSectionCacheBackup(filePath)) return false;
+  // A new-spec build may read its live prefix, but never the old active
+  // layout's pages/LUTs. Matching partials remain readable until caught up.
+  committedCacheReadable_ = readSectionFileData(filePath, spec);
+  return true;
+}
+
+bool Section::openCacheForRead(FsFile& target) const {
+  return committedCacheReadable_ && Storage.openFileForRead("SCT", filePath, target);
+}
 
 uint32_t Section::onPageComplete(std::unique_ptr<Page> page) {
   if (!ensureBuildFileOpen()) {
@@ -225,7 +313,50 @@ bool Section::writeSectionFileHeader(const ReaderRenderSpec& spec) {
 }
 
 bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
-  if (!Storage.openFileForRead("SCT", filePath, file)) {
+  if (build_ || !activeBuildTmpSectionPath_.empty()) {
+    LOG_ERR("SCT", "Cannot activate a section layout during an active build");
+    return false;
+  }
+  const bool recoveryComplete = recoverSectionCacheBackup(filePath);
+  if (readSectionFileData(filePath, spec)) {
+    committedCacheReadable_ = true;
+    return true;
+  }
+  if (!recoveryComplete) {
+    resetReadableCacheState();
+    return false;
+  }
+  const std::string alternatePath = filePath + SECTION_ALTERNATE_SUFFIX;
+  if (readSectionFileData(alternatePath, spec) && promoteSectionCache(alternatePath, filePath)) {
+    currentPage = 0;
+    committedCacheReadable_ = true;
+    return true;
+  }
+  resetReadableCacheState();
+  return false;
+}
+
+void Section::resetReadableCacheState() {
+  committedCacheReadable_ = false;
+  pageCount = 0;
+  partial_ = false;
+  partialPageCount_ = 0;
+  partialProtectedImageUnits_ = 0;
+  partialBytesConsumed_ = 0;
+  partialTotalBytes_ = 0;
+  protectedImageUnits_ = 0;
+  buildComplete_ = false;
+  builtPageCount_ = 0;
+}
+
+bool Section::readSectionFileData(const std::string& path, const ReaderRenderSpec& spec) {
+  resetReadableCacheState();
+  if (!Storage.openFileForRead("SCT", path, file)) {
+    return false;
+  }
+  if (file.size() < HEADER_SIZE) {
+    file.close();
+    LOG_ERR("SCT", "Deserialization failed: truncated fixed header");
     return false;
   }
 
@@ -236,13 +367,11 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
     if (!serialization::tryReadPod(file, magic)) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: could not read cache magic");
-      clearCache();
       return false;
     }
     if (magic != SECTION_CACHE_MAGIC) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: cache magic mismatch");
-      clearCache();
       return false;
     }
 
@@ -250,14 +379,12 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
     if (!serialization::tryReadPod(file, version)) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: could not read version");
-      clearCache();
       return false;
     }
     if (version != SECTION_FILE_VERSION && version != SECTION_FILE_PARTIAL_VERSION) {
       // Explicit close() required: member variable persists beyond function scope
       file.close();
       LOG_ERR("SCT", "Deserialization failed: Unknown version %u", version);
-      clearCache();
       return false;
     }
     filePartial = (version == SECTION_FILE_PARTIAL_VERSION);
@@ -287,7 +414,6 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
         !serialization::tryReadPod(file, fileWordSpacing) || !serialization::tryReadPod(file, fileRenderMode)) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: truncated section header");
-      clearCache();
       return false;
     }
 
@@ -301,7 +427,6 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
         static_cast<uint8_t>(spec.renderMode) != fileRenderMode) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: Parameters do not match");
-      clearCache();
       return false;
     }
   }
@@ -309,13 +434,18 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
   if (!serialization::tryReadPod(file, pageCount)) {
     file.close();
     LOG_ERR("SCT", "Deserialization failed: missing page count");
-    clearCache();
     return false;
   }
   if (!serialization::tryReadPod(file, partialProtectedImageUnits_)) {
     file.close();
     LOG_ERR("SCT", "Deserialization failed: missing protected image units");
-    clearCache();
+    pageCount = 0;
+    return false;
+  }
+  uint32_t fixedLutOffsets[5];
+  if (file.read(fixedLutOffsets, sizeof(fixedLutOffsets)) != static_cast<int>(sizeof(fixedLutOffsets))) {
+    file.close();
+    LOG_ERR("SCT", "Deserialization failed: missing fixed LUT header");
     pageCount = 0;
     return false;
   }
@@ -327,7 +457,6 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
     if (!file.seek(HEADER_SIZE - sizeof(uint32_t)) || !serialization::tryReadPod(file, visibleTextLutOffset)) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: missing partial trailer offset");
-      clearCache();
       pageCount = 0;
       return false;
     }
@@ -337,7 +466,6 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
     if (!trailerValid) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: malformed partial section");
-      clearCache();
       pageCount = 0;
       return false;
     }
@@ -345,7 +473,6 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
         !serialization::tryReadPod(file, partialTotalBytes_)) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: truncated partial trailer");
-      clearCache();
       pageCount = 0;
       return false;
     }
@@ -365,31 +492,33 @@ bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
   return true;
 }
 
-// Your updated class method (assuming you are using the 'SD' object, which is a wrapper for a specific filesystem)
+// An explicit invalidation clears this spine/mode's active and alternate caches.
 bool Section::clearCache() const {
-  const std::string tmpBin = binTmpPath();
-  if (Storage.exists(tmpBin.c_str())) {
-    Storage.remove(tmpBin.c_str());
-  }
-  const std::string backupPath = sectionBackupPath(filePath);
-  if (Storage.exists(backupPath.c_str())) {
-    Storage.remove(backupPath.c_str());
-  }
-  if (!Storage.exists(filePath.c_str())) {
-    return true;
-  }
-
-  if (!Storage.remove(filePath.c_str())) {
-    LOG_ERR("SCT", "Failed to clear cache");
+  if (build_ || !activeBuildTmpSectionPath_.empty()) {
+    LOG_ERR("SCT", "Cannot clear a layout cache during an active build");
     return false;
   }
-
-  return true;
+  committedCacheReadable_ = false;
+  bool cleared = true;
+  const size_t baseLength = filePath.size();
+  std::string path;
+  path.reserve(baseLength + sizeof(SECTION_ALTERNATE_SUFFIX) - 1);
+  path = filePath;
+  for (const char* suffix : {"", SECTION_ALTERNATE_SUFFIX, ".bak", ".part", ".tmp"}) {
+    path.resize(baseLength);
+    path += suffix;
+    if (Storage.exists(path.c_str()) && !Storage.remove(path.c_str())) {
+      LOG_ERR("SCT", "Failed to clear cache: %s", path.c_str());
+      cleared = false;
+    }
+  }
+  return cleared;
 }
 
 bool Section::createSectionFile(const ReaderRenderSpec& spec, const std::function<void()>& popupFn,
                                 bool* imagesWereSuppressed, bool* layoutAbortedForLowMemory,
                                 const SectionBuildOptions buildOptions) {
+  if (!prepareBuild(spec)) return false;
   const int fontId = spec.fontId;
   const float lineCompression = spec.lineCompression;
   const bool extraParagraphSpacing = spec.extraParagraphSpacing;
@@ -740,11 +869,13 @@ bool Section::createSectionFile(const ReaderRenderSpec& spec, const std::functio
   partial_ = false;
   partialPageCount_ = 0;
   partialProtectedImageUnits_ = 0;
+  committedCacheReadable_ = true;
   return true;
 }
 
 bool Section::startBuild(const ReaderRenderSpec& spec, const SectionBuildOptions buildOptions,
                          const std::function<void()>& popupFn) {
+  if (!prepareBuild(spec)) return false;
   const int fontId = spec.fontId;
   const float lineCompression = spec.lineCompression;
   const bool extraParagraphSpacing = spec.extraParagraphSpacing;
@@ -759,10 +890,6 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const SectionBuildOptions
   const bool guideReadingEnabled = spec.guideReadingEnabled;
   const uint8_t wordSpacing = spec.wordSpacing;
   const EpubRenderMode renderMode = spec.renderMode;
-  if (build_) {
-    LOG_ERR("SCT", "startBuild called while a build is already active");
-    return false;
-  }
 
   // Reclaim rebuildable font data before CSS and layout allocate their
   // working buffers. Font objects remain registered and reload on demand.
@@ -1153,12 +1280,13 @@ bool Section::commitBuildFile(const uint8_t version, const uint32_t bytesConsume
   file.close();
 
   // Keep the readable cache as a backup until the completed replacement is in
-  // place. A reboot after the backup rename recovers it in the constructor.
+  // place. A reboot after either rename recovers the last activated layout.
   if (!promoteSectionCache(build_->tmpSectionPath, filePath)) {
     LOG_ERR("SCT", "Failed to move built section into place");
     Storage.remove(build_->tmpSectionPath.c_str());
     return false;
   }
+  committedCacheReadable_ = true;
   return true;
 }
 
@@ -1253,11 +1381,9 @@ void Section::abandonBuild() {
   if (!build_->tmpSectionPath.empty() && Storage.exists(build_->tmpSectionPath.c_str())) {
     Storage.remove(build_->tmpSectionPath.c_str());
   }
-  // A parse error would recur against the same HTML, so drop any partial too -- resuming
-  // from it would just re-enter the failing build every open.
-  if (Storage.exists(filePath.c_str())) {
-    Storage.remove(filePath.c_str());
-  }
+  // Keep the last activated layout and its alternate intact. In particular a
+  // failed new-spec build must not erase the old active layout used by sync.
+  committedCacheReadable_ = false;
   if (!build_->reusedHtml && Storage.exists(build_->tmpHtmlPath.c_str())) {
     Storage.remove(build_->tmpHtmlPath.c_str());
   }
@@ -1302,7 +1428,7 @@ std::unique_ptr<Page> Section::loadPageDuringBuild(const int page) {
 // `file` open on the tmp .bin.
 std::unique_ptr<Page> Section::loadPageAt(const int page) const {
   HalFile f;
-  if (!Storage.openFileForRead("SCT", filePath, f)) {
+  if (!openCacheForRead(f)) {
     return nullptr;
   }
 
@@ -1342,7 +1468,7 @@ std::unique_ptr<Page> Section::loadPageFromSectionFile() { return loadPage(curre
 
 std::optional<uint16_t> Section::getCachedPageCount() const {
   FsFile f;
-  if (!Storage.openFileForRead("SCT", filePath, f)) {
+  if (!openCacheForRead(f)) {
     return std::nullopt;
   }
 
@@ -1378,7 +1504,7 @@ std::optional<uint16_t> Section::getCachedPageCount() const {
 
 std::optional<uint16_t> Section::getPageForAnchor(const std::string& anchor) const {
   FsFile f;
-  if (!Storage.openFileForRead("SCT", filePath, f)) {
+  if (!openCacheForRead(f)) {
     return std::nullopt;
   }
 
@@ -1421,7 +1547,7 @@ std::optional<uint16_t> Section::getPageForParagraphIndex(const uint16_t pIndex)
   }
 
   FsFile f;
-  if (!Storage.openFileForRead("SCT", filePath, f)) {
+  if (!openCacheForRead(f)) {
     return std::nullopt;
   }
 
@@ -1485,7 +1611,7 @@ std::optional<uint16_t> Section::getParagraphIndexForPage(const uint16_t page) c
   }
 
   FsFile f;
-  if (!Storage.openFileForRead("SCT", filePath, f)) {
+  if (!openCacheForRead(f)) {
     return std::nullopt;
   }
 
@@ -1533,7 +1659,7 @@ std::optional<uint16_t> Section::getListItemIndexForPage(const uint16_t page) co
   }
 
   FsFile f;
-  if (!Storage.openFileForRead("SCT", filePath, f)) {
+  if (!openCacheForRead(f)) {
     return std::nullopt;
   }
 
@@ -1588,7 +1714,7 @@ std::optional<uint16_t> Section::getListItemIndexForPage(const uint16_t page) co
 
 std::optional<uint16_t> Section::getPageForListItemIndex(const uint16_t liIndex) const {
   FsFile f;
-  if (!Storage.openFileForRead("SCT", filePath, f)) {
+  if (!openCacheForRead(f)) {
     return std::nullopt;
   }
 
@@ -1656,7 +1782,7 @@ std::optional<uint32_t> Section::getVisibleTextOffsetForPage(const uint16_t page
   }
 
   FsFile f;
-  if (!Storage.openFileForRead("SCT", filePath, f)) return std::nullopt;
+  if (!openCacheForRead(f)) return std::nullopt;
   const uint32_t fileSize = f.size();
   if (!f.seek(HEADER_SIZE - sizeof(uint32_t) * 6 - sizeof(uint16_t))) return std::nullopt;
   uint16_t count = 0;
@@ -1697,7 +1823,7 @@ std::optional<uint16_t> Section::getPageForVisibleTextOffset(const uint32_t offs
   }
 
   FsFile f;
-  if (!Storage.openFileForRead("SCT", filePath, f)) return std::nullopt;
+  if (!openCacheForRead(f)) return std::nullopt;
   const uint32_t fileSize = f.size();
   uint32_t magic = 0;
   uint8_t version = 0;

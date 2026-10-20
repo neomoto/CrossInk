@@ -39,6 +39,8 @@ class Section {
   Epub* epub;
   const int spineIndex;
   GfxRenderer& renderer;
+  // The legacy path always names the last successfully activated layout;
+  // one fixed .alt.bin sibling retains the other layout.
   std::string filePath;
   HalFile file;
 
@@ -65,6 +67,9 @@ class Section {
   };
   std::unique_ptr<BuildContext> build_;
   bool buildComplete_ = false;
+  // Fresh metadata readers use active A; a reader-spec miss disables its old
+  // pages/LUTs until a matching load or successful replacement enables them.
+  mutable bool committedCacheReadable_ = true;
   bool lastImagesWereSuppressed_ = false;
   bool lastLayoutAbortedForLowMemory_ = false;
   uint16_t imageEstimateViewportHeight_ = 0;
@@ -80,6 +85,10 @@ class Section {
   uint32_t partialTotalBytes_ = 0;
   std::string activeBuildTmpSectionPath_;
 
+  bool prepareBuild(const ReaderRenderSpec& spec);
+  void resetReadableCacheState();
+  bool readSectionFileData(const std::string& path, const ReaderRenderSpec& spec);
+  bool openCacheForRead(FsFile& target) const;
   bool writeSectionFileHeader(const ReaderRenderSpec& spec);
   uint32_t onPageComplete(std::unique_ptr<Page> page);
   bool ensureBuildFileOpen();
@@ -103,6 +112,8 @@ class Section {
                    const char* cacheSuffix = "");
   explicit Section(Epub& epub, int spineIndex, GfxRenderer& renderer, const char* cacheSuffix = "");
   ~Section();
+  // Reuse the active layout or validate and atomically activate the alternate.
+  // Metadata-only consumers continue reading the legacy active path.
   bool loadSectionFile(const ReaderRenderSpec& spec);
   bool clearCache() const;
   bool createSectionFile(const ReaderRenderSpec& spec, const std::function<void()>& popupFn = nullptr,
@@ -154,7 +165,7 @@ class Section {
   // whole chapter. Returns nullopt if the anchor hasn't been reached yet (build more) or no build.
   std::optional<uint16_t> findAnchorDuringBuild(const std::string& anchor) const;
 
-  // Get the page count from the section cache file without fully loading it.
+  // Read the last activated cache's count without deserializing page payloads.
   std::optional<uint16_t> getCachedPageCount() const;
 
   // Image units already protected by laid-out pages, and the non-image units

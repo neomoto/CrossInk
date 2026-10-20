@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <tuple>
@@ -16,6 +17,21 @@ constexpr int8_t kDenseMatrix[] = {-5, 0, 7, -9, -11, 0, 0, 13, -17};
 constexpr uint16_t kRowOffsets[] = {0, 2, 4, 6};
 constexpr uint8_t kSparseColumns[] = {0, 2, 0, 1, 1, 2};
 constexpr int8_t kSparseValues[] = {-5, 7, -9, -11, 13, -17};
+
+constexpr std::array<uint8_t, 256> kAsciiClasses = [] {
+  std::array<uint8_t, 256> classes{};
+  classes[0] = 1;
+  classes['A'] = 1;
+  classes['B'] = 2;
+  classes['D'] = 3;
+  classes[0x7F] = 2;
+  classes[128] = 3;
+  classes[128 + 'A'] = 2;
+  classes[128 + 'B'] = 3;
+  classes[128 + 'C'] = 1;
+  classes[128 + 0x7F] = 1;
+  return classes;
+}();
 
 struct ClassMap {
   std::vector<EpdKernClassEntry> packed;
@@ -100,6 +116,12 @@ class KerningLookupTest : public testing::TestWithParam<std::tuple<bool, bool>> 
     } else {
       data_.kernMatrix = kDenseMatrix;
     }
+  }
+
+  void configureAscii() {
+    configure({{0, 1}, {'A', 1}, {'B', 2}, {'C', 0}, {'D', 3}, {0x7F, 2}, {0x80, 3}, {0x100, 2}, {0xFFFF, 3}},
+              {{0, 3}, {'A', 2}, {'B', 3}, {'C', 1}, {'D', 0}, {0x7F, 1}, {0x80, 2}, {0x100, 3}, {0xFFFF, 2}});
+    data_.kernAsciiClassIds = kAsciiClasses.data();
   }
 
   EpdFont font() const { return EpdFont(&data_); }
@@ -294,6 +316,84 @@ TEST_P(KerningLookupTest, BoundedDeterministicDuplicateMapsMatchAroundEveryKey) 
     }
   }
 }
+
+TEST_P(KerningLookupTest, AsciiClassesRetainAsymmetricPairsZeroClassesAndMisses) {
+  configureAscii();
+  for (uint32_t left = 0; left < 128; ++left) {
+    for (uint32_t right = 0; right < 128; ++right) {
+      expectPair(left, right);
+    }
+  }
+  EXPECT_EQ(font().getKerning('A', 'B'), 7);
+  EXPECT_EQ(font().getKerning('B', 'A'), -11);
+  EXPECT_EQ(font().getKerning('D', 'A'), 13);
+  EXPECT_EQ(font().getKerning('A', 'C'), -5);
+  EXPECT_EQ(font().getKerning('A', 'A'), 0);  // Present classes, zero matrix cell.
+  EXPECT_EQ(font().getKerning('C', 'A'), 0);  // Explicit zero left class.
+  EXPECT_EQ(font().getKerning('A', 'D'), 0);  // Explicit zero right class.
+  EXPECT_EQ(font().getKerning('Z', 'A'), 0);  // Absent left codepoint.
+  EXPECT_EQ(font().getKerning('A', 'Z'), 0);  // Absent right codepoint.
+}
+
+TEST_P(KerningLookupTest, AsciiEndpointsAndNonAsciiFallbackDoNotAlias) {
+  configureAscii();
+  constexpr uint32_t queries[] = {0,    1,     'A',   'B',    0x7E,    0x7F,     0x80,
+                                  0x81, 0x100, 0x101, 0xFFFF, 0x10000, 0x10FFFF, 0xFFFFFFFF};
+  for (const uint32_t left : queries) {
+    for (const uint32_t right : queries) {
+      expectPair(left, right);
+    }
+  }
+  EXPECT_EQ(font().getKerning(0, 0), 7);
+  EXPECT_EQ(font().getKerning(0x7F, 0x7F), -9);
+  EXPECT_EQ(font().getKerning(0x7F, 0x80), -11);
+  EXPECT_EQ(font().getKerning(0x80, 0x7F), 0);
+  EXPECT_EQ(font().getKerning(0x80, 0x80), 13);
+  EXPECT_EQ(font().getKerning(0x80, 0x100), -17);
+  EXPECT_EQ(font().getKerning(0xFFFF, 0xFFFF), 13);
+}
+
+TEST_P(KerningLookupTest, NonAsciiDuplicatesKeepFirstClassWithAsciiClassesPresent) {
+  configure({{'A', 1}, {0x80, 3}, {0x80, 2}, {0x100, 0}, {0x100, 1}, {0xFFFF, 3}, {0xFFFF, 1}},
+            {{'A', 2}, {0x80, 2}, {0x80, 3}, {0x100, 0}, {0x100, 3}, {0xFFFF, 2}, {0xFFFF, 1}});
+  data_.kernAsciiClassIds = kAsciiClasses.data();
+  constexpr uint32_t queries[] = {'A', 0x80, 0x81, 0xFF, 0x100, 0x101, 0xFFFE, 0xFFFF, 0x10000};
+  for (const uint32_t cp : queries) {
+    expectPair(cp, 'A');
+    expectPair('A', cp);
+    expectPair(cp, cp);
+  }
+  EXPECT_EQ(font().getKerning(0x80, 0x80), 13);
+  EXPECT_EQ(font().getKerning(0x100, 'A'), 0);
+  EXPECT_EQ(font().getKerning('A', 0x100), 0);
+}
+
+TEST_P(KerningLookupTest, CjkGuardRemainsAheadOfAsciiAndFallbackClasses) {
+  configure({{'A', 1}, {0x4E00, 3}}, {{'A', 2}, {0x4E00, 1}});
+  data_.kernAsciiClassIds = kAsciiClasses.data();
+  EXPECT_EQ(font().getKerning(0x4E00, 'A'), 0);
+  EXPECT_EQ(font().getKerning('A', 0x4E00), 0);
+  EXPECT_EQ(font().getKerning(0x4E00, 0x4E00), 0);
+}
+
+#if CROSSINK_SCALABLE_FONTS
+TEST_P(KerningLookupTest, ScalableKerningOverridesStaticClassesAfterTheCjkGuard) {
+  configureAscii();
+  int calls = 0;
+  data_.glyphMissCtx = &calls;
+  data_.kerningHandler = [](void* ctx, uint32_t, uint32_t) -> int8_t {
+    ++*static_cast<int*>(ctx);
+    return 23;
+  };
+  EXPECT_EQ(font().getKerning('A', 'B'), 23);
+  EXPECT_EQ(font().getKerning('Z', 'Z'), 23);
+  EXPECT_EQ(font().getKerning(0x80, 0x80), 23);
+  EXPECT_EQ(calls, 3);
+  EXPECT_EQ(font().getKerning(0x4E00, 'A'), 0);
+  EXPECT_EQ(font().getKerning('A', 0x4E00), 0);
+  EXPECT_EQ(calls, 3);
+}
+#endif
 
 INSTANTIATE_TEST_SUITE_P(MapAndMatrixRepresentations, KerningLookupTest,
                          testing::Combine(testing::Bool(), testing::Bool()));

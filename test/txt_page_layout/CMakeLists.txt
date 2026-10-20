@@ -4,6 +4,8 @@ add_executable(TxtPageLayoutTest
 )
 
 target_include_directories(TxtPageLayoutTest PRIVATE
+  ${REPO_ROOT}/test/section_persistence/stubs
+  ${REPO_ROOT}/lib/Serialization
   ${REPO_ROOT}/lib/Txt
   ${REPO_ROOT}/lib/Utf8
 )

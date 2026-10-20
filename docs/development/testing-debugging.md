@@ -60,6 +60,21 @@ Freeze both binaries before comparison and run them sequentially without
 concurrent builds. Normal runs can use `/usr/bin/time -l` for process peak RSS;
 the simulator's fixed `MEM`/`SIMRESOURCE` values are not measured ESP32 heap use.
 
+For input-to-presentation correlation, a paired local simulator SDK checkout can
+enable application hooks with `-DCROSSPOINT_SIM_PERF_TRACE_API=1`, then set
+`CROSSPOINT_SIM_PERF_TRACE=1` at runtime. These hooks are native-only and tracing
+is off by default. The public dependency pin is not changed to an unpublished
+SDK commit; a local symlink override validates paired checkouts, not a portable
+Git dependency install.
+
+`SIMPERF` records use actual applied input edges, observed phases, request IDs,
+render generations, and SDL presentation IDs. A release-driven action's
+down-to-presentation time includes the actual button hold. Only use a
+`present_return` with `valid=1`; overlapping conversion or failed SDL operations
+make the frame association ambiguous. Coalesced requests are not automatically
+lost input. Use identical tracing settings for latency comparisons, and leave
+this trace off for ordinary render-call benchmarks.
+
 ### Measured native optimization results
 
 On macOS arm64, three alternating before/after pairs compared the same optimized
@@ -176,6 +191,119 @@ Extracted helpers separate codepoint normalization, scalar glyph snapshots,
 cursor/bounds accumulation, prepared-width dispatch, and bounded fitting.
 New measurement helpers have counts at most 9. Truncation's outer routine stays
 at 8, with its unchanged UTF-8 candidate lambda at 5.
+
+### Shared pipeline and rotation optimization
+
+This pass compares the optimized `b7d1052a` application baseline with shared
+glyph drawing, ASCII kerning, metadata/ZIP I/O batching, and bounded layout
+reuse. Both native binaries use `-O2`. Three alternating pairs for each of
+16 normal-application workloads produced 96 runs; causal tracing was disabled
+and the existing render-duration logger was enabled on both sides.
+
+The following are macOS arm64 **host milliseconds**, not ESP32 or e-ink timings.
+Rendering values are medians of the three per-run navigation medians. Indexing
+values measure the complete logged index operation; cold means a cold application
+cache, not a flushed operating-system disk cache.
+
+| Workload | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| Short library rows | 1.388 | 1.268 |
+| Long metadata library rows | 3.702 | 3.598 |
+| Settings tabs | 1.178 | 1.072 |
+| Settings rows | 1.180 | 1.078 |
+| Reader menu | 1.246 | 1.111 |
+| Home | 1.268 | 1.129 |
+| Library sort menu | 3.354 | 3.240 |
+| Large Arabic settings | 1.338 | 1.292 |
+| EPUB turns, cold-start run | 7.032 | 6.540 |
+| EPUB turns, warm-start run | 7.132 | 6.489 |
+| TXT turns, cold-start run | 5.966 | 5.540 |
+| TXT turns, warm-start run | 6.075 | 5.575 |
+| TXT cold-start maximum render | 32.887 | 21.812 |
+| Mixed JPEG/PNG/text page turns | 7.430 | 6.528 |
+| Cold metadata indexing, 1,000 books | 356 | 258 |
+| Explicit unchanged rescan, 1,000 books | 89 | 52 |
+| One changed book among 1,000 | 96 | 91 |
+
+The TXT startup row is the median of each run's maximum startup render.
+There is substantial host scheduling variation, especially in the long-library
+case; do not interpret the small improvements as precise device latency claims.
+All 129 paired full SDL captures are pixel-identical. Book bytes, settings,
+application state, and persisted progress match between each pair. Warm metadata
+controls parse no books; changed-one controls parse exactly one and reuse 999.
+
+Input latency has a separate control: 18 contemporaneous alternating normal
+runs with causal tracing enabled and the render-duration logger unset. All 432
+isolated input/render associations have valid presentations and are
+release-driven. The table reports medians of the three per-run medians:
+
+| Release to SDL presentation return | Before (ms) | After (ms) |
+| --- | ---: | ---: |
+| EPUB | 17.057 | 17.231 |
+| TXT | 17.945 | 18.012 |
+| Library | 17.614 | 18.013 |
+
+There is **no meaningful end-to-end button-latency improvement** in this control,
+despite lower render work. After-change request-to-render medians are 19–20 us;
+down-to-presentation also includes the approximately 79 ms actual button hold.
+Do not report a shorter render call as a faster physical button response.
+Button hold, debounce, rotation-stability intervals, and e-ink drivers are
+unchanged.
+
+Default Inter UI fonts are **1-bpp**. Optimizing only the 2-bpp reader path does
+not optimize those screens. Monochrome drawing now decodes source-byte chunks;
+2-bpp drawing merges framebuffer masks in both physical directions. Read-only
+ASCII kerning tables retain the original Unicode and callback fallbacks. The
+37 generated headers preserve all 434 original arrays byte-for-byte; all 9,472
+new class IDs were independently checked against the original maps. This was
+metadata-only regeneration, not font substitution or rerasterization.
+
+Index metadata fields share one checked prefix traversal. ZIP central-directory
+headers use one checked 46-byte read rather than eight small reads and three
+seeks. Neither change introduces a whole-directory cache or a persistent value
+cache. EPUB retains the last activated layout at its original path plus one
+alternate; TXT retains narrow/wide indexes with the original file reserved for
+legacy page-anchor migration. File formats and full-key validation are unchanged.
+
+A separate controlled four-direction production-reader replay passes with all
+43 grayscale captures identical to the baseline:
+
+| Repeated-rotation metric | Before | After |
+| --- | ---: | ---: |
+| EPUB section builds | 15 | 2 |
+| Sampled render-thread CPU (ms) | 966 | 459 |
+
+This is one profiled replay pair, not a twofold improvement in wall-clock
+rotation latency: sensor holds, scripted waits, and e-ink refresh are not removed.
+
+A normal TXT P0-to-landscape scenario also exits to Home and reopens the reader.
+All four full SDL surfaces match the baseline; the canonical six-byte zero
+anchor remains unchanged, the original narrow index is retained, and the wide
+index is byte-identical to the baseline's active wide index. Initial portrait,
+auto-rotation-enabled settings, and reader-resume load count are explicit
+controls, not inferred from a previously completed card.
+
+The full native suite passes 1,092 CTest entries. Targeted ASan/UBSan coverage
+includes glyph/kerning bounds, ZIP/index I/O failures, interrupted layout
+transactions, legacy TXT anchors, and constructor-only EPUB sync consumers.
+The ESP32-C3 image is 6,335,488 bytes with 218,112 bytes of OTA-partition headroom;
+reported static RAM is 64,832 bytes. Its offline image checksum and validation
+hash pass. No reader, serial port, or physical SD card was accessed; physical
+latency, peak heap, and peak stack remain unmeasured.
+
+Local evidence is under `crossink-global-performance-3ctrxh4n` in the macOS
+temporary directory: `final-paired-runs/results.json`,
+`final-paired-analysis.json`, the frozen native binaries, source/image identity
+receipts, and Instruments traces. Normal baseline SHA-256 starts `3b375d0c`;
+candidate starts `d7c271bf`. The paired simulator SDK is local commit `43dbb83`;
+the public dependency pin remains `6c768461`. A local symlink build is not proof
+that an unpublished SDK Git pin can be fetched.
+
+Under the manual complexity convention above, the raster dispatcher is 10,
+new monochrome helpers are 1–6, and the kerning wrapper is 9 for bitmap fonts or
+10 with scalable-font dispatch. The ASCII shortcut adds one decision while
+avoiding CJK checks for proven ASCII pairs.
+
 
 ## Flash and monitor
 

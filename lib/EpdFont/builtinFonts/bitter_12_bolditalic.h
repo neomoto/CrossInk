@@ -2609,6 +2609,25 @@ static const EpdFontGroup bitter_12_bolditalicGroups[] = {
     { 25169, 165, 297, 2, 919 },
 };
 
+static const uint8_t bitter_12_bolditalicKernAsciiClassIds[256] = {
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   1,   2,   0,   3,   0,   4,   2,   5,   0,   0,   0,   6,   7,   6,   8,
+      9,  10,  11,  12,  13,  14,  15,  16,  17,  18,  19,  19,   0,   0,   0,  20,
+     21,  22,  23,  24,  21,  25,  26,  27,  28,  28,  29,  30,  31,  28,  28,  21,
+     32,  33,  34,   3,  35,  29,  36,  36,  30,  37,  38,  39,  40,   0,   0,  41,
+      0,  42,  43,  44,  45,  46,  47,  48,  42,  45,  48,  49,  45,  42,  42,  43,
+     43,  50,  51,  52,  53,  54,  55,  55,  49,  55,  56,  57,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+      0,   1,   2,   0,   3,   0,   4,   2,   0,   5,   6,   0,   7,   8,   7,   9,
+     10,  11,  12,  13,  14,  15,  16,  17,   4,  18,  19,  19,   0,   0,   0,  20,
+     21,  22,  23,  21,  23,  23,  23,  21,  23,  23,  24,  23,  23,  23,  23,  21,
+     23,  21,  23,   3,  25,  26,  27,  27,  28,  29,  30,   0,  31,  32,   0,  33,
+      0,  34,  35,  34,  34,  34,  36,  34,  37,  38,  39,  37,  37,  38,  38,  34,
+     40,  34,  38,  41,  42,  43,  44,  44,  45,  46,  47,   0,  48,  49,   0,   0,
+};
+
 static const uint16_t bitter_12_bolditalicKernLeftCodepoints[] = {
     0x0021, 0x0022, 0x0024, 0x0026, 0x0027, 0x0028, 0x002C, 0x002D, 0x002E, 0x002F, 0x0030, 0x0031,
     0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039, 0x003A, 0x003B, 0x003F, 0x0040,
@@ -3453,4 +3472,16 @@ static constexpr EpdFontData bitter_12_bolditalic = {
     110,
     bitter_12_bolditalicLigaturePairs,
     2,
+    nullptr,  // glyphMissHandler
+    nullptr,  // glyphMissCtx
+    nullptr,  // coverageHandler
+#if CROSSINK_SCALABLE_FONTS
+    nullptr,  // dynamicGlyphHandler
+    nullptr,  // bitmapHandler
+    nullptr,  // kerningHandler
+    nullptr,  // ligatureHandler
+    nullptr,  // sizeFamily
+    0,        // pointSize
+#endif
+    bitter_12_bolditalicKernAsciiClassIds,
 };
