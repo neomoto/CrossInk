@@ -243,6 +243,33 @@ BmpReaderError Bitmap::readNextRow(uint8_t* data, uint8_t* rowBuffer) const {
     sourceRowsRead++;
   }
 
+  if (bpp == 2 && nativePalette && outputWidth == width && outputHeight == height && !atkinsonDitherer && !fsDitherer) {
+    // Cached covers already have packed native pixels, but palette order and
+    // brightness/contrast/gamma still determine what each stored index means.
+    uint8_t colors[4];
+    for (int i = 0; i < 4; i++) colors[i] = static_cast<uint8_t>(adjustPixel(paletteLum[i]) >> 6);
+
+    const int packedBytes = (width + 3) / 4;
+    if (colors[0] == 0 && colors[1] == 1 && colors[2] == 2 && colors[3] == 3) {
+      std::memmove(data, rowBuffer, packedBytes);
+    } else {
+      // Two pixels per lookup keep arbitrary native palettes off the generic
+      // per-pixel path, using only 16 bytes of temporary mapping storage.
+      uint8_t pairs[16];
+      for (int i = 0; i < 16; i++) {
+        pairs[i] = static_cast<uint8_t>((colors[i >> 2] << 2) | colors[i & 3]);
+      }
+      for (int i = 0; i < packedBytes; i++) {
+        const uint8_t packed = rowBuffer[i];
+        data[i] = static_cast<uint8_t>((pairs[packed >> 4] << 4) | pairs[packed & 0x0F]);
+      }
+    }
+    // BMP tail bits and byte padding are not pixels in the normalized row.
+    if (width & 3) data[packedBytes - 1] &= static_cast<uint8_t>(0xFFu << (8 - (width & 3) * 2));
+    outputRowsRead++;
+    return BmpReaderError::Ok;
+  }
+
   uint8_t* outPtr = data;
   uint8_t currentOutByte = 0;
   int bitShift = 6;

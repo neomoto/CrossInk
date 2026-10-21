@@ -1,6 +1,101 @@
-> **This is a personal fork of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)** with a focus on improved fonts and minimal reading stats.
+# CrossInk — Personal X3 Fork
 
-### Supported Devices
+This is of [CrossInk](https://github.com/uxjulia/CrossInk), which itself builds on [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader).
+
+## What’s Different in This Fork
+### Natural, Sensor-Calibrated Auto-Rotation
+Reading in bed or switching hands was awkward without rotating the screen, but existing auto-rotation was too twitchy—flipping upside down when laid flat on a desk, and rotating backwards because the X3's accelerometer is physically mounted 180° inverted compared to other boards.
+
+We added an orientation filter that waits for ~0.5 seconds of a stable, unambiguous hold before rotating, explicitly ignoring flat desk rests, diagonal angles, and mid-transition tilts. The axes are re-mapped specifically for the X3's hardware mounting, and long-pressing the Power button now rotates 90° clockwise on demand (cleanly suppressing the short-press sleep action upon release). The result is reliable 4-way rotation for EPUB and TXT books that only turns when you intend it to, never wobbles on a table, and includes an instant one-handed physical button shortcut.
+
+See [automatic orientation](./docs/controls.md#automatic-reading-orientation) and [Power button actions](./docs/controls.md#power-back-and-menu-button-actions) for setup details.
+
+### Exact Reading Position Retention
+Rotating or reflowing shouldn't make you lose your place or force you to hunt for the paragraph you were reading. Instead of tracking fragile page numbers, the reader anchors your exact reading position using text anchors for EPUBs and byte anchors for TXT files.
+
+When you flip orientation or reflow text, the exact sentence you were reading stays right before your eyes. Viewport layouts are cached so flipping orientation back and forth is instantaneous, and legacy TXT bookmarks are automatically migrated and preserved across index rebuilds without corruption.
+
+### Instant Sleep Transitions & Fast Cover Art
+Putting the reader down should feel immediate—not flash an "entering sleep" modal or grind away processing the cover art. We optimized 2-bit grayscale bitmap rendering by normalizing palettes once per row and writing packed bytes directly to display buffers, bypassing per-pixel conversion overhead. On eligible screens, intermediate popups are skipped entirely while preserving safe power-manager handoffs and durable progress saves.
+
+On physical X3 hardware, total sleep preparation dropped from **3.35s to 1.21s (2.77× faster)**, while decoding and rendering cached cover art plummeted from **1.84s to just 0.23s (nearly 8× faster)**—giving you a clean, near-instant transition straight to your book cover.
+
+### Smoother UI Scrolling & Text Rendering
+Recalculating font metrics, kerning pairs, and layout geometry on every single frame put unnecessary load on the 160 MHz CPU, making list browsing feel sluggish. We cached and reused resolved glyph metrics and text-fit boundaries across render passes, introduced read-only ASCII kerning lookups for built-in fonts, and optimized glyph drawing with packed-bit writes to the framebuffer.
+
+During continuous library scrolling, sampled render-thread CPU time dropped by **~43%** (from 378 ms to 214 ms), and list item renders dropped from 3.94 ms to 2.43 ms—making library browsing noticeably more fluid without altering visual geometry or font clarity.
+
+### Fast Library Indexing & Less SD Card Wear
+Scanning hundreds of books used to freeze the interface and batter the SD card with thousands of tiny, fragmented I/O calls. We replaced fixed, arbitrary indexing pauses with a cooperative work-budget yield that keeps the UI responsive to button presses, and bundled adjacent metadata, ZIP directory headers, and page offsets into bounded batch reads.
+
+Cold library scans on 1,000 EPUBs dropped from over a second to **~50 ms** in testing (**95% faster**), eliminating thousands of redundant disk accesses and keeping library navigation snappy.
+
+### Background Next-Page Preparation (Zero-Wait Page Turns)
+Readers spend 30 to 60 seconds on a page; we put that idle time to work so page turns feel instantaneous. The EPUB engine quietly decodes and prepares the upcoming page in the background while you read. Under strict free-heap and contiguous-block gates, it automatically releases speculative memory before foreground fallback, font changes, or user reflows.
+
+When you tap next, the page appears immediately—slashing foreground filesystem operations from **3,458 to just 182** over an 18-page run (a 95% reduction). If a page is unusually complex or memory runs low, it seamlessly falls back to normal foreground loading with zero risk of crashes.
+
+### Instant Home Dashboard & Lighter Startup
+Booting up or jumping Home should feel instant. We deferred non-essential dashboard context queries (like OPDS catalogs and bookmarks) until you actually open the dashboard menu, and eliminated redundant settings rewrites on wake when using automatic device naming. Initial Home startup requires zero optional background calls, navigation stays responsive, and flash storage is spared from unnecessary write cycles during wake-up.
+
+The Home and next-page optimizations adapt ideas from [YACP](https://github.com/Sichroteph/YACP) and [CrossDiTo](https://github.com/dito94/CrossDiTo); see the [attribution and scope notes](./docs/development/testing-debugging.md#x3-bounded-home-and-next-page-ports) for X3-specific adaptations.
+
+## Performance & Measurements
+
+To make sure these optimizations delivered real-world gains without compromising battery life or stability, we benchmarked and verified each change on both physical X3 hardware and instrumented native builds.
+
+### Real-World Hardware (Xteink X3)
+
+To test cold sleep performance, we timed putting an X3 to sleep while displaying a cached 515×792 full-screen book cover (`COVER / NO_FILTER / FIT` mode), measuring from `enterDeepSleep()` entry to the safe power-manager handoff:
+
+| Workload | Stock / Baseline | Optimized | Impact |
+| --- | ---: | ---: | --- |
+| **Total sleep preparation** | 3.349 s | **1.211 s** | **2.77× faster** (near-instant transition) |
+| **Decode & draw (both grayscale planes)** | 1.840 s | **0.230 s** | **7.98× faster** (smooth cover rendering) |
+| **Panel activation handshake** | 0.821 s | 0.820 s | Controller-bound hardware timing (unchanged) |
+
+In daily use, putting the reader to sleep no longer feels like a chore. The device immediately paints the cover and shuts down cleanly, while preserving full progress persistence, controller safety thresholds, and power-down sequencing. Detailed logs and timing breakdowns are documented in [physical measurements](./docs/development/testing-debugging.md#physical-x3-measurement).
+
+### Native Profiling & Host Workloads
+
+We used optimized native builds (macOS arm64) with frame pointers to isolate CPU bottlenecks and compare identical workloads against their direct baselines without SD card hardware variance:
+
+| Workload | Baseline | Optimized | Impact |
+| --- | ---: | ---: | --- |
+| **80-step Library scroll (render CPU)** | 378 ms | **214 ms** | **~43% less CPU time** via glyph & kerning reuse |
+| **Library item render (median)** | 3.942 ms | **2.431 ms** | **38% faster** UI list rendering |
+| **Cold library index (1,000 EPUBs)** | 1,099 ms | **51 ms** | **95% faster** cold scan via work-budget yields |
+| **Incremental index (1 changed, 999 reused)** | 101 ms | **67 ms** | **34% faster** cached library check |
+| **Warm EPUB page render (median)** | 6.581 ms | **5.677 ms** | **14% faster** text rendering |
+| **Warm TXT page render (median)** | 5.586 ms | **5.335 ms** | Snappier TXT page display |
+| **Rotation replay (render CPU)** | 365 ms | **345 ms** | Smoother orientation flips |
+
+*Tradeoffs and edge cases:* Not every path sees dramatic acceleration—cold TXT page renders and physical button-to-presentation latencies are bottlenecked by display and storage hardware and remain essentially even. Some uncached image or small-font cases show modest tradeoffs, which is why optimizations are conservatively bounded to prioritize stability over raw synthetic scores.
+
+### Filesystem & I/O Reduction
+
+Consolidating fragmented disk reads and moving I/O out of the foreground path reduces flash storage wear and eliminates micro-stutters:
+
+| Workload | Baseline | Optimized | Real-World Impact |
+| --- | ---: | ---: | --- |
+| **Foreground page loads (18 EPUB turns)** | 3,458 calls | **182 calls** | **95% fewer foreground calls** via idle page prep |
+| **Dashboard Home startup calls** | 17 calls | **0 calls** | Deferred non-essential checks until menu opens |
+| **Wake-up settings saves** | 20 calls | **0 calls** | Eliminated redundant flash writes on boot/wake |
+
+### Rigorous Testing & Safety Gates
+
+Performance wins mean nothing if books crash or bookmarks get corrupted. Every change was held to strict safety gates:
+
+- **1,171 automated tests** passed with AddressSanitizer and UndefinedBehaviorSanitizer enabled.
+- **17 paired native sleep/wake cases** verified pixel-perfect buffer consistency (34 SDL surface pairs, 17 B/W buffers), ensuring settings, reading progress, and bookmarks survive intact.
+- **On-device verification:** Flashed and tested on physical X3 hardware with zero crashes, reliable auto-rotation, intact reading anchors, and verified power management.
+- **Memory footprint:** The final C3 firmware image is **6.35 MB** with **64.8 KB** static RAM, preserving over **201 KB** of free headroom within the configured OTA flash budget.
+
+See the [changelog](./CHANGELOG.md#unreleased) and [profiling documentation](./docs/development/testing-debugging.md#native-performance-profiling) for full benchmark logs, workloads, and methodology.
+
+## Device Coverage
+
+CrossInk includes hardware profiles for several devices:
 
 - Xteink X3
 - Xteink X4
@@ -8,9 +103,11 @@
 - Xteink X4 Classic
 - Seeed Studio Sticky
 
-## What's different in this fork
+> **Important:** While the firmware compiles for all supported targets, the auto-rotation sensor calibrations and physical timing checks in this fork were specifically developed and verified on the **Xteink X3**.
 
-My goal with this fork was to maintain the core Crosspoint firmware while integrating my preferred typography and some lightweight reading statistics. I’ve focused on keeping the underlying system stable while layering in a few "nice-to-have" features and UI refinements along the way.
+## Inherited CrossInk Features
+
+Credit where credit is due: the typography, reading statistics, custom themes, and core reader features below are the wonderful work of [upstream CrossInk](https://github.com/uxjulia/CrossInk) by uxjulia. They are fully included here alongside our X3-specific improvements.
 
 <table>
   <tr>
@@ -51,7 +148,7 @@ My goal with this fork was to maintain the core Crosspoint firmware while integr
 - Reading [progress sync](./docs/nearby-position-sync.md) between two CrossInk devices.
 - Added customizable Auto Page Turn Interval (anything between 5-120 seconds).
 - Added ability to view Recent Books as a 3x3 grid view.
-- To view a more detailed list for each version, visit the [releases](https://github.com/uxjulia/CrossInk/releases) page to read release notes.
+- For inherited CrossInk release notes, see the [upstream releases](https://github.com/uxjulia/CrossInk/releases).
 
 ---
 
@@ -92,7 +189,7 @@ See [Controls](./docs/controls.md) for the full action list and defaults.
 
 ## Tips for the best reading experience
 
-CrossInk runs on an ESP32-C3 with limited RAM, so very large folders or complex EPUBs can be slower than they would be on a phone, tablet, or desktop app.
+The Xteink X3 runs on an ESP32-C3 with limited RAM, so very large folders or complex EPUBs can be slow.
 
 - Keep folders under about 200 files. For the smoothest browsing, aim for 50-100 files per folder.
 - Having 1000+ books on the SD card is fine if they are split into smaller folders, such as by author, series, genre, or read/unread status.
@@ -106,11 +203,9 @@ CrossInk runs on an ESP32-C3 with limited RAM, so very large folders or complex 
 
 ## Installation
 
-The fastest way to install Crossink is by using Inky, Crossink's web companion app: https://inky.crossink.dev/#flash-tools
+To run these optimizations and auto-rotation features, build and flash from source on this repository's [`perf/x3-reader` branch](https://github.com/neomoto/CrossInk/tree/perf/x3-reader) using the [build instructions](./docs/development/getting-started.md).
 
-Download a `firmware-*.bin` from the [releases page](https://github.com/uxjulia/CrossInk/releases), then flash it with the web installer or command line.
-
-See [Installation](./docs/installation.md) for step-by-step flashing and revert instructions.
+> **Note:** Pre-built binaries from [upstream CrossInk releases](https://github.com/uxjulia/CrossInk/releases) and the [Inky web installer](https://inky.crossink.dev/#flash-tools) deliver official upstream firmware, not this fork's changes. See the [installation guide](./docs/installation.md) for standard flashing and revert workflows.
 
 ---
 
@@ -152,6 +247,9 @@ git submodule update --init --recursive
 
 Then flash the firmware using the correct environment for the device. The `default` environment is for the X3/X4 devices. ESP32-S3 devices have their own named environments.
 
+> [!CAUTION]
+> Always keep a full recovery backup and check your partition layout before flashing custom firmware. The generic `upload` command below performs a direct flash without automated recovery safeguards.
+
 ```sh
 pio run -e default --target upload
 ```
@@ -162,12 +260,12 @@ See [Testing and Debugging](./docs/development/testing-debugging.md) for serial 
 
 ---
 
-## Notice on Contributions
+## Upstream & Community
 
-This repository does not accept pull requests. Feature requests may be opened in [discussions](https://github.com/uxjulia/CrossInk/discussions), but major features requiring ongoing support should be directed upstream to [CrossPoint](https://github.com/crosspoint-reader/crosspoint-reader).
+Upstream CrossInk does not accept pull requests; feature requests and ideas can be shared in the [CrossInk discussions](https://github.com/uxjulia/CrossInk/discussions), while broader architecture features are generally directed upstream to [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader).
 
 ---
 
-If you'd like to show some love and support ongoing development, please consider supporting me on Ko-fi.
+If you enjoy CrossInk and want to support the core upstream project, please consider supporting Julia on Ko-fi:
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/Q5Q01M6S7)

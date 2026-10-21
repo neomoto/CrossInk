@@ -45,8 +45,21 @@
   conservative free-heap and contiguous-block gates. Consume it once or release it
   before foreground loading, font replacement, reflow, overlays, or background work.
   Large pages and low-memory conditions use the existing requested-page path.
+- Skip the intermediate X3 sleep popup for plain sleep screens and successfully
+  rendered cached covers. Keep feedback for cover preparation and failed-cache
+  fallbacks, with unchanged final images, progress saves, and shutdown order.
+- Normalize native two-bit BMP palettes once per row and reuse packed pixels
+  instead of repeating per-pixel resampling and adjustment. Preserve padding,
+  short-read handling, row order, and rewind behavior.
+- Rasterize eligible unscaled bitmap rows with packed-bit writes. Preserve
+  monochrome, overlay and absolute grayscale, rotation, clipping, and strip
+  bounds without allocating another row or framebuffer.
 
 ### Fixed
+
+- Avoid rewriting current settings on every boot or wake when the device name
+  already uses the canonical empty value for automatic naming. Continue to
+  persist genuine repairs and legacy migrations.
 
 - Correct the X3's 180-degree in-plane sensor mounting for automatic EPUB/TXT
   rotation using labelled portrait/left/right measurements from one physical

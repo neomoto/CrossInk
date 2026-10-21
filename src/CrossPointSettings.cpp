@@ -561,7 +561,9 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc, bool importingCrossPoint
       }
       strncpy(destination, value.c_str(), info.stringMaxLen - 1);
       destination[info.stringMaxLen - 1] = '\0';
-      if (strcmp(info.key, "deviceName") == 0 && strlen(destination) < MIN_DEVICE_NAME_LENGTH) {
+      // Empty already selects the hardware default; only malformed custom names need repair.
+      if (strcmp(info.key, "deviceName") == 0 && destination[0] != '\0' &&
+          strlen(destination) < MIN_DEVICE_NAME_LENGTH) {
         destination[0] = '\0';
         needsResave = true;
       }

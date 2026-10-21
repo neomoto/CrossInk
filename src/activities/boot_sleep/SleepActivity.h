@@ -21,9 +21,10 @@ class SleepActivity final : public Activity {
   bool rendersBeforeExit() const;
 
  private:
+  void renderEnteringSleepPopup() const;
   void renderDefaultSleepScreen() const;
   void renderCustomSleepScreen() const;
-  void renderCoverSleepScreen() const;
+  void renderCoverSleepScreen(bool sleepPopupDeferred) const;
   void renderReadingStatsSleepScreen() const;
   void renderMinimalSleepScreen() const;
   void renderMinimalStatsSleepScreen() const;
