@@ -73,6 +73,33 @@ bounded backup/rollback paths. Partial-cache watermarks, progress, bookmarks,
 and per-book reader settings keep their existing formats. No second layout is
 retained in RAM.
 
+### Idle Next-Page Preparation
+
+After the existing 400 ms idle delay, the EPUB reader may prepare one immediate
+successor under a nonblocking render lock. It keeps page records, not a second
+framebuffer or a second chapter layout.
+
+The committed serialized page must fit within 8 KiB. The same decoder enforces
+a 16 KiB allocation-accounting ceiling before allocating nested records or
+reading their payloads. This charge includes conservative allocation allowances;
+it is not a measurement of physical device heap consumption. The page's exact
+byte span is checked through the same open file handle.
+
+Retention requires at least 80 KiB free and a 56 KiB largest contiguous block
+before preparation, then at least 64 KiB free and a 40 KiB block afterward.
+Existing transient SD-font preparation keeps its separate 64/40 KiB admission
+gate and also uses bounded page loading.
+
+Reuse requires the exact book, section generation, spine, page, font generation,
+and full render specification. A hit transfers ownership once. A miss frees the
+prepared page before allocating the requested page. Font changes release it
+before catalog discovery or replacement-font loading; navigation, reflow,
+overlays, background section work, and exit also invalidate it as needed.
+
+Oversized, malformed, unavailable, or memory-constrained preparation is optional:
+the normal requested-page loader remains available. Idle preparation does not
+advance progress or change any SD-cache, bookmark, or settings format.
+
 ## TXT Layout and Bookmarks
 
 TXT page indexes use layout version 5 for forward-greedy wrapping. The reader

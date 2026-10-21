@@ -452,6 +452,142 @@ exits to Home, and reopens. All four complete SDL captures match. The six-byte
 zero progress anchor and original narrow index remain intact; the wide index
 is byte-identical to the baseline. This scenario does not use a smoke driver.
 
+### X3-bounded Home and next-page ports
+
+Two ideas were adapted without importing PSRAM requirements or changing input,
+power, SPI, refresh waveforms, or persistent formats:
+
+- [YACP, `23568ad3`](https://github.com/Sichroteph/YACP/tree/23568ad3580740068cd3466f400b6900f08a1a15):
+  defer OPDS, bookmark, and clipping presence checks while the Minimal/Dashboard
+  Home menu is hidden. Refresh them when the menu opens. Visible-menu themes,
+  an explicit initial menu selection, and visible Home statistics stay eager.
+- [CrossDiTo, `4506e2e9`](https://github.com/dito94/CrossDiTo/tree/4506e2e9516dc1330695cb6f4c337e7d12a7fe55):
+  prepare one exact next EPUB page during the existing idle window and consume
+  it once. X3 uses stricter byte, allocation, and heap gates rather than the
+  PSRAM reader's page-count-only cache. See [cache policy](../data-cache.md#idle-next-page-preparation).
+
+The projects' existing MIT copyright/license is retained, with pinned source
+attribution at the adapted implementations. Two implementation workers and one
+safety reviewer ran on `openai-codex/gpt-6.1-sol` without fallback. The request
+was xhigh; this runtime records the reasoning level as `max`.
+
+#### What the profiler establishes
+
+Instruments File Activity follows real calls in the native application.
+For a Dashboard fixture containing all optional data, hidden-menu startup
+performs 17 optional-context filesystem calls before the change and zero
+afterward. Opening the menu performs the deferred checks; reopening refreshes
+presence again. The visible Lyra menu still performs its 17 startup calls.
+This moves work, rather than eliminating every future metadata read.
+
+On 18 paced forward EPUB turns, foreground `Section::loadPageAt` filesystem
+calls fall from 3,458 to 182: 19 page loads become the initial load plus
+18 consumed prepared pages. A preparation log alone is not evidence of a hit;
+foreground call stacks establish consumption.
+
+Total filesystem calls in that trace increase from 4,637 to 7,574. Bounded
+decoding adds native cursor queries, and an unused final successor is prepared.
+Time Profiler does not establish a total CPU reduction. Final-binary File
+Activity replays reproduce these Home and page-call counts after the empty-cache
+fast path was added.
+
+#### Final paired native measurements
+
+The frozen baseline and final binary ran 54 normal launches: three pairs for
+each of six reader scenarios, plus one pair for each of nine Home/menu variants.
+All 103 complete SDL surface pairs match. Source books, settings, progress,
+bookmarks, and other retained primary state have no before/after differences.
+
+Each change below is the median of three within-pair changes in run-median
+render-call time; negative means faster. Execution order alternates between
+pairs. Reader scenarios contain 18 turns, or 12 for alternating/image cases.
+
+| Reader scenario | Median paired change | Range across pairs |
+| --- | ---: | ---: |
+| Styled EPUB, paced forward | -10.7% | -11.2% to +2.9% |
+| Rapid forward control | -14.3% | -29.0% to -3.2% |
+| Paced forward/backward | -6.0% | -12.8% to -1.8% |
+| Dense prose, paced forward | -10.7% | -11.9% to -9.8% |
+| Dense small-font control | +2.9% | +1.8% to +3.5% |
+| JPEG/PNG control | +5.0% | -3.3% to +38.5% |
+
+Small-font pages were not prepared. Rapid runs prepare only before and after
+the burst, and image runs log just two preparations; do not attribute their
+timing changes to sustained page reuse. Home rendering differences are small
+and mixed. Tail timings also vary, particularly for alternating and image
+cases. This is not an across-the-board CPU, button-latency, or panel-speed win.
+
+#### Safety and retained state
+
+The independent review caught speculative ownership surviving into font
+discovery/replacement. The fix releases it before all six font-size feedback
+routes and before replacement-font loading, using the existing lock ownership
+rather than nesting locks. The reviewer closed the finding.
+
+The final native binary passes these actual-application scenarios:
+
+- Four-way EPUB/TXT rotation, Power hold/release, disabled/flat/noise/overlay
+  gates, settings, content anchors, and TXT sleep reconstruction: all 43 PGM
+  pairs and 30 anchor records match the baseline.
+- Front-button long-hold and side-button short-press font changes: six complete
+  SDL surface pairs match; each larger-font frame differs from its initial
+  frame, and each restored frame matches it. Settings and progress match.
+- TXT page-zero rotation, Home exit, and reopen: all four surfaces match,
+  with the original narrow index and retained primary state unchanged.
+- A malformed optional successor is rejected once without changing the current
+  page, source book, or cache bytes. Both applications exit normally.
+
+Every reader probe asserts actual `EpubReader`/`TxtReader` entry. Normal entry
+clears `lastSleepFromReader` for crash-loop protection, so a copied post-run seed
+can otherwise resume Home. Early font probes and two profiles with the wrong
+initial activity were rejected, not counted as reader evidence.
+
+Process RSS is not a page-allocation measurement. Separate live `heap` and
+`malloc_history` snapshots after the same 18 turns find 7,584 bytes in 82 live
+allocations under the prepared page's decoder, and a 7,696-byte total live-heap
+delta. This is one public native fixture, not a measured C3 peak, allocator
+fragmentation bound, or physical-device safety guarantee. Diagnostic binaries
+were disposable copies; debug entitlements were not applied to firmware.
+
+The final source passes 1,158 CTest entries and 86 affected ASan/UBSan checks.
+The ESP32-C3 image is 6,340,640 bytes, with 212,960 bytes of OTA headroom;
+static RAM remains 64,832 bytes. The image grows 3,184 bytes over the preceding
+optimized baseline. Static RAM does not account for dynamic page ownership.
+Offline image checksum and validation hash pass. Firmware SHA-256 is
+`13a65f8262a86bb8b826da21ef5bfab202c04a83c91495d255aaa30e2bc845a7`.
+The cached IDF app descriptor is not the source identity; the receipt includes
+the frozen binary hash and all 20 implementation/test source hashes.
+
+Evidence is retained under `crossink-x3-ports-40518ip0` in the macOS temporary
+directory. Native baseline SHA-256 starts `00dd8b09`; final SHA-256 starts
+`d794a28a`. The local SDK revisions and public dependency-pin caveat above still
+apply; this pass changes neither SDK. The optimization runs did not access a
+physical reader or private card. The subsequent authorized installation is
+documented below; neither pass pushed code or published a PR.
+
+#### Subsequent physical X3 installation
+
+The same firmware hash above was installed in the designated app1 test slot.
+Full readback matched the image; the original app0, bootloader, partition table,
+NVS, recovery selector, and protected flash suffix passed preservation checks.
+The final live OTA record selects app1 with sequence 12, state VALID, and a valid
+CRC. The original selector sector remains byte-identical.
+
+The first trial became ABORTED after an immediate USB-serial reset. Retrying
+only the test selector, with serial closed through the first working UI,
+succeeded without rewriting the application. Confirm the trial is VALID before
+opening a serial monitor; a reset during pending verification can trigger rollback.
+
+A subsequent 20-second capture from the confirmed image observed X3/UC8253,
+initialized IMU, detected SD, and boot/periodic memory reports, with no observed
+panic, watchdog, or brownout. The user confirmed a responsive screen and the
+original book and saved passage. The final official reset left the app running
+with serial closed.
+
+Host flashing did not access, format, or clear the SD card; no independent SD
+backup was taken. These checks establish installation, bounded startup health,
+and user-reported state preservation, not sustained heap or physical latency.
+
 
 ## Flash and monitor
 

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <tuple>
 
 #include "EpubRenderMode.h"
 
@@ -28,6 +29,17 @@ struct ReaderRenderSpec {
   uint8_t wordSpacing = 0;
   EpubRenderMode renderMode = EpubRenderMode::CrossInkDefault;
 };
+
+inline bool readerRenderSpecsEqual(const ReaderRenderSpec& left, const ReaderRenderSpec& right) {
+  return std::tie(left.fontId, left.lineCompression, left.extraParagraphSpacing, left.forceParagraphIndents,
+                  left.paragraphAlignment, left.viewportWidth, left.viewportHeight, left.hyphenationEnabled,
+                  left.embeddedStyle, left.imageRendering, left.focusReadingEnabled, left.guideReadingEnabled,
+                  left.wordSpacing, left.renderMode) ==
+         std::tie(right.fontId, right.lineCompression, right.extraParagraphSpacing, right.forceParagraphIndents,
+                  right.paragraphAlignment, right.viewportWidth, right.viewportHeight, right.hyphenationEnabled,
+                  right.embeddedStyle, right.imageRendering, right.focusReadingEnabled, right.guideReadingEnabled,
+                  right.wordSpacing, right.renderMode);
+}
 
 inline uint32_t readerRenderSpecSignature(const ReaderRenderSpec& spec) {
   uint32_t signature = 2166136261U;

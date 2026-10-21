@@ -39,6 +39,12 @@
   position matches before an SD-card error.
 - Reuse a validated ZIP entry descriptor between XML sizing and streaming.
   Keep file handles closed between those operations and recheck archive identity.
+- Defer hidden OPDS, bookmark, and clipping checks until the menu opens on
+  Minimal and Dashboard Home screens. Keep visible menus and Home statistics eager.
+- Prepare one exact next EPUB page during idle time, with bounded decoding and
+  conservative free-heap and contiguous-block gates. Consume it once or release it
+  before foreground loading, font replacement, reflow, overlays, or background work.
+  Large pages and low-memory conditions use the existing requested-page path.
 
 ### Fixed
 

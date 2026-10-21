@@ -16,7 +16,14 @@ bool ImageBlock::serialize(FsFile&) {
   ADD_FAILURE() << "Unexpected image serialization";
   return false;
 }
+#ifdef PSRAM_REFERENCE
 std::unique_ptr<ImageBlock> ImageBlock::deserialize(FsFile&) {
   ADD_FAILURE() << "Unexpected image deserialization";
   return nullptr;
 }
+#else
+std::unique_ptr<ImageBlock> ImageBlock::deserialize(FsFile&, PageReadBudget*) {
+  ADD_FAILURE() << "Unexpected image deserialization";
+  return nullptr;
+}
+#endif

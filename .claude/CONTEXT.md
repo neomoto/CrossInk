@@ -10,11 +10,10 @@ Refer to https://freeink.org/llms.txt for guidance.
 
 - Simulator patches belong in the adjacent `crossink-simulator` repo.
 - The valid local simulator env in this repo is `simulator`, and `pio run -e simulator` currently builds cleanly.
-- The simulator `PNGdec` stub in `crossink-simulator/src/PNGdec.h` needs to mirror the real API shape used by app code, including `hasAlpha()` and `getTransparentColor()`, even though decode still fails intentionally.
+- The local simulator SDK's `PNGdec` and `JPEGDEC` compatibility shims decode through `stb_image` and invoke the firmware draw callbacks. Ignoring the embedded decoder libraries in `platformio.ini` does not disable these host shims. Keep their API shapes aligned with firmware calls.
 - Known simulator limits:
-  - No image rendering: `platformio.ini` ignores `hal`, `PNGdec`, and `JPEGDEC`, so image decoders are intentionally absent.
-  - JPEGDEC stub always fails; `JPEGDEC fallback: open failed (err=-1)` is expected in simulator.
-  - `esp_deep_sleep_start()` is a no-op in simulator.
+  - Host image decoding is a visual preview, not the hardware decoder's timing or memory behavior.
+  - `HalPowerManager::startDeepSleep()` delegates to the simulated sleep loop; a button wake relaunches as a power wake. This does not model physical deep-sleep current or wake timing.
   - `HalStorage` uses POSIX file access under `./fs_` and allows multiple readers, unlike real hardware.
 
 ## Real Hardware / Storage

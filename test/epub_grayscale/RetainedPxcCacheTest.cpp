@@ -226,4 +226,71 @@ TEST_F(RetainedPxcCacheTest, ChangedDimensionsBypassThePreviousPathEntry) {
   EXPECT_EQ(Storage.data("image.pxc").readBytes - bytesBeforeReload, 4u + static_cast<size_t>(200 / 4) * 122);
 }
 
+TEST_F(RetainedPxcCacheTest, BoundedIdleImageMetadataRoundTripsWithoutPreparingOrChangingImagePixels) {
+  Storage.put("idle-image.pxc", cache(200, 120, 3));
+  ImageBlock image("idle-image.jpg", "source.jpg", 200, 120);
+  FsFile output;
+  ASSERT_TRUE(Storage.openFileForWrite("test", "idle-image-record", output));
+  ASSERT_TRUE(image.serialize(output));
+  output.close();
+  const auto bytes = Storage.bytes("idle-image-record");
+  SeedContext seed{};
+  ImageBlock::setExtractor(&seed, nullptr, seedCache);
+  FsFile input;
+  ASSERT_TRUE(Storage.openFileForRead("test", "idle-image-record", input));
+  PageReadBudget budget(0, bytes.size());
+  auto restored = ImageBlock::deserialize(input, &budget);
+  ASSERT_NE(restored, nullptr);
+  EXPECT_EQ(input.position(), bytes.size());
+  EXPECT_EQ(restored->getImagePath(), "idle-image.jpg");
+  EXPECT_EQ(restored->getWidth(), 200);
+  EXPECT_EQ(restored->getHeight(), 120);
+  EXPECT_EQ(seed.calls, 0);
+  GfxRenderer expected(800, 480);
+  GfxRenderer actual(800, 480);
+  render(expected, "idle-image.pxc", 200, 120);
+  actual.clearScreen(255);
+  restored->render(actual, 0, 0, true);
+  EXPECT_EQ(actual.bw, expected.bw);
+  EXPECT_EQ(Storage.bytes("idle-image-record"), bytes);
+}
+
+TEST_F(RetainedPxcCacheTest, BoundedIdleImageRejectsBothMalformedStringLengthsBeforeAllocation) {
+  ImageBlock image("image.jpg", "source.jpg", 200, 120);
+  FsFile output;
+  ASSERT_TRUE(Storage.openFileForWrite("test", "idle-image-good", output));
+  ASSERT_TRUE(image.serialize(output));
+  output.close();
+  const auto valid = Storage.bytes("idle-image-good");
+  for (const size_t offset : {size_t{0}, sizeof(uint32_t) + std::string("image.jpg").size()}) {
+    auto bytes = valid;
+    std::fill_n(bytes.begin() + offset, sizeof(uint32_t), 0xff);
+    Storage.put("idle-image-bad", bytes);
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "idle-image-bad", input));
+    PageReadBudget budget(0, bytes.size());
+    EXPECT_EQ(ImageBlock::deserialize(input, &budget), nullptr);
+    EXPECT_EQ(Storage.bytes("idle-image-bad"), bytes);
+  }
+}
+
+TEST_F(RetainedPxcCacheTest, BoundedIdleImageCannotConsumeAnotherRecordsStringPayload) {
+  ImageBlock image("image.jpg", "source.jpg", 200, 120);
+  FsFile output;
+  ASSERT_TRUE(Storage.openFileForWrite("test", "idle-image-good", output));
+  ASSERT_TRUE(image.serialize(output));
+  output.close();
+  const auto valid = Storage.bytes("idle-image-good");
+  for (size_t cut = 1; cut < valid.size(); ++cut) {
+    std::vector<uint8_t> bytes(valid.begin(), valid.begin() + cut);
+    bytes.insert(bytes.end(), valid.begin(), valid.end());
+    Storage.put("idle-image-cut", bytes);
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "idle-image-cut", input));
+    PageReadBudget budget(0, cut);
+    EXPECT_EQ(ImageBlock::deserialize(input, &budget), nullptr);
+    EXPECT_LE(input.position(), cut);
+  }
+}
+
 }  // namespace

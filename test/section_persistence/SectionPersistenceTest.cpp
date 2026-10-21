@@ -897,4 +897,79 @@ TEST_F(SectionPersistenceTest, UnresolvedRecoveryCannotReplaceAValidatedAlternat
   EXPECT_EQ(metadata.getPageForVisibleTextOffset(68, true), 2);
 }
 
+TEST_F(SectionPersistenceTest, IdleCommittedPageSpansPreserveReadingPositionAndParagraphAnchors) {
+  for (const uint8_t version : {kFullVersion, kPartialVersion}) {
+    SectionHarness harness;
+    harness.begin({{"destination", 1}});
+    harness.appendPages(3);
+    ASSERT_TRUE(harness.commit(version, 150, 300));
+    harness.finishSuccessfulCommit();
+    Section reader(harness.epub, 0, harness.renderer);
+    ASSERT_TRUE(reader.loadSectionFile(harness.spec));
+    reader.currentPage = 1;
+    const auto before = Storage.bytes(harness.section.filePath);
+    for (const int page : {0, 1, 2}) {
+      EXPECT_NE(reader.loadPageForIdle(page), nullptr);
+      EXPECT_EQ(reader.currentPage, 1);
+      EXPECT_EQ(reader.getParagraphIndexForPage(1), 3);
+      EXPECT_EQ(reader.findAnchor("destination"), 1);
+    }
+    EXPECT_EQ(reader.loadPageForIdle(-1), nullptr);
+    EXPECT_EQ(reader.loadPageForIdle(3), nullptr);
+    EXPECT_EQ(Storage.bytes(harness.section.filePath), before);
+  }
+}
+
+TEST_F(SectionPersistenceTest, IdlePreparationDeclinesActiveBuildPagesWithoutChangingTheReadableWatermark) {
+  SectionHarness harness;
+  harness.begin();
+  harness.appendPages(2);
+  harness.section.currentPage = 1;
+  const auto before = Storage.bytes(harness.section.binTmpPath());
+  EXPECT_EQ(harness.section.loadPageForIdle(0), nullptr);
+  EXPECT_EQ(harness.section.currentPage, 1);
+  EXPECT_EQ(harness.section.pageCount, 2);
+  EXPECT_EQ(Storage.bytes(harness.section.binTmpPath()), before);
+}
+
+TEST_F(SectionPersistenceTest, IdleMalformedLutSpansDeclineWithoutCacheWritesOrPositionChanges) {
+  SectionHarness harness;
+  harness.begin({{"destination", 1}});
+  harness.appendPages(3);
+  ASSERT_TRUE(harness.commit(kFullVersion));
+  harness.finishSuccessfulCommit();
+  const auto original = Storage.bytes(harness.section.filePath);
+  const size_t lutField = harness.serializedHeaderSize - sizeof(uint32_t) * 5;
+  const uint32_t lut = readUint32At(original, lutField);
+  const size_t pageField = lut + sizeof(uint32_t);
+  const uint32_t pageStart = readUint32At(original, pageField);
+  const uint32_t nextPage = readUint32At(original, pageField + sizeof(uint32_t));
+  const std::vector<std::pair<size_t, uint32_t>> corruptions = {{lutField, 0},
+                                                                {lutField, UINT32_MAX},
+                                                                {lutField, static_cast<uint32_t>(original.size() - 3)},
+                                                                {pageField, 0},
+                                                                {pageField, nextPage},
+                                                                {pageField, UINT32_MAX},
+                                                                {pageField + sizeof(uint32_t), 0},
+                                                                {pageField + sizeof(uint32_t), pageStart},
+                                                                {pageField + sizeof(uint32_t), lut + 1}};
+  for (const auto& [offset, value] : corruptions) {
+    Storage.put(harness.section.filePath, original);
+    Section reader(harness.epub, 0, harness.renderer);
+    ASSERT_TRUE(reader.loadSectionFile(harness.spec));
+    reader.currentPage = 1;
+    auto corrupt = original;
+    writeUint32At(corrupt, offset, value);
+    Storage.put(harness.section.filePath, corrupt);
+    EXPECT_EQ(reader.loadPageForIdle(1), nullptr);
+    EXPECT_EQ(reader.currentPage, 1);
+    EXPECT_EQ(reader.pageCount, 3);
+    EXPECT_EQ(Storage.bytes(harness.section.filePath), corrupt);
+    Storage.put(harness.section.filePath, original);
+    EXPECT_NE(reader.loadPage(1), nullptr);
+    EXPECT_EQ(reader.getParagraphIndexForPage(1), 3);
+    EXPECT_EQ(reader.findAnchor("destination"), 1);
+  }
+}
+
 }  // namespace

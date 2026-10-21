@@ -1,6 +1,7 @@
 #pragma once
 #include <Epub.h>
 #include <Epub/FootnoteEntry.h>
+#include <Epub/IdlePagePreparation.h>
 #include <Epub/Section.h>
 #include <Memory.h>
 #include <freertos/FreeRTOS.h>
@@ -114,6 +115,10 @@ class EpubReaderActivity final : public Activity {
   int nextPageNumber = 0;
   int activeSectionFontId = 0;
   uint32_t activeSectionLayoutSignature = 0;
+  ReaderRenderSpec activeSectionRenderSpec;
+  uint32_t sectionGeneration = 0;
+  IdlePagePreparation idlePagePreparation;
+  std::optional<IdlePageKey> idlePageAttempt;
   std::optional<uint16_t> pendingPageJump;
   // Set when navigating to a footnote href with a fragment (e.g. #note1).
   // Cleared on the next render after the new section loads and resolves it to a page.
@@ -163,9 +168,14 @@ class EpubReaderActivity final : public Activity {
   QueuedTurnRenderingState queuedTurnRendering;
   unsigned long pageShownAtMs = 0UL;
   unsigned long lastRenderCompleteMs = 0UL;
-  int idlePrewarmSpine = -1;
-  int idlePrewarmPage = -1;
-  int idlePrewarmFontId = 0;
+  void resetSection();
+  void releaseIdlePagePreparation();
+  IdlePageKey idlePageKey(int page) const;
+  bool canIdlePrepareNextPage() const;
+  bool prewarmIdlePageFont(const Page& page, int fontId);
+  void prepareIdlePage(const IdlePageKey& key, bool retain);
+  std::unique_ptr<Page> loadCurrentPage();
+  void startReaderChild(std::unique_ptr<Activity>&& activity, ActivityResultHandler resultHandler);
   bool paceSampleWarmupPending = true;
   uint32_t sessionPaceSampleSeconds = 0;
   uint16_t sessionPaceSampleCount = 0;

@@ -10,7 +10,13 @@
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
+#include <mutex>
 
+#ifndef PSRAM_REFERENCE
+#include <Epub/IdlePagePreparation.h>
+#include <Epub/PageReadBudget.h>
+#endif
 // Hyphen dictionary availability is outside allocation policy. Exercise the
 // production non-hyphenating layout, real bidi, TextBlock and serialization.
 std::vector<Hyphenator::BreakInfo> Hyphenator::breakOffsets(const std::string&, bool) { return {}; }
@@ -474,3 +480,360 @@ TEST_F(TextLayoutBackingTest, RealTextPageRejectsPartialReadsBeforePhysicalEndOf
     input.close();
   }
 }
+
+#ifndef PSRAM_REFERENCE
+namespace {
+
+std::vector<uint8_t> idlePageBytes(const Page& page) {
+  FsFile output;
+  EXPECT_TRUE(Storage.openFileForWrite("test", "idle-serialized", output));
+  EXPECT_TRUE(page.serialize(output));
+  output.close();
+  return Storage.bytes("idle-serialized");
+}
+
+Page singleLineIdlePage(const std::string& text) {
+  auto line = std::make_shared<TextBlock>(std::vector<std::string>{text}, std::vector<int16_t>{17},
+                                          std::vector<EpdFontFamily::Style>{EpdFontFamily::REGULAR},
+                                          std::vector<uint8_t>{}, std::vector<uint16_t>{}, std::vector<uint16_t>{},
+                                          std::vector<uint8_t>{}, std::vector<bool>{false});
+  Page page;
+  page.elements.push_back(std::make_unique<PageLine>(std::move(line), 3, 19));
+  return page;
+}
+
+std::unique_ptr<Page> loadIdleFixture() {
+  const auto bytes = persistedTextPageBytes();
+  Storage.put("idle-fixture", bytes);
+  FsFile input;
+  if (!Storage.openFileForRead("test", "idle-fixture", input)) return nullptr;
+  return Page::deserializeForIdle(input, bytes.size());
+}
+
+IdlePageKey idleKey() {
+  static const int book = 1;
+  static const int section = 2;
+  IdlePageKey key;
+  key.book = &book;
+  key.section = &section;
+  key.sectionGeneration = 7;
+  key.spine = 3;
+  key.page = 5;
+  key.fontGeneration = 11;
+  key.layout.fontId = 12;
+  key.layout.lineCompression = 1.0003f;
+  key.layout.viewportWidth = 480;
+  key.layout.viewportHeight = 700;
+  return key;
+}
+
+}  // namespace
+
+TEST_F(TextLayoutBackingTest, IdlePageKeepsRealTextTableRubyFootnoteAndPublisherAnchors) {
+  auto page = loadIdleFixture();
+  ASSERT_NE(page, nullptr);
+  EXPECT_EQ(idlePageBytes(*page), persistedTextPageBytes());
+  const auto& line = static_cast<const PageLine&>(*page->elements[0]);
+  EXPECT_EQ(line.xPos, -11);
+  EXPECT_EQ(line.yPos, 13);
+  EXPECT_STREQ(line.getBlock()->wordText(1), "読");
+  EXPECT_EQ(line.getBlock()->getRubyTexts()[1], "どく");
+  EXPECT_EQ(page->footnotes[0].linkId, 1);
+  EXPECT_STREQ(page->footnotes[0].href, "#fn");
+  EXPECT_EQ(page->publisherPageMarkers[0].yPos, 50);
+}
+
+TEST_F(TextLayoutBackingTest, IdlePageNeverBorrowsTheFollowingPagesBytesToCompleteATruncatedRecord) {
+  const auto complete = persistedTextPageBytes();
+  for (size_t cut = 0; cut < complete.size(); ++cut) {
+    SCOPED_TRACE(cut);
+    std::vector<uint8_t> bytes(complete.begin(), complete.begin() + cut);
+    bytes.insert(bytes.end(), complete.begin(), complete.end());
+    Storage.put("adjacent-pages", bytes);
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "adjacent-pages", input));
+    EXPECT_EQ(Page::deserializeForIdle(input, cut), nullptr);
+    EXPECT_LE(input.position(), cut);
+    ASSERT_TRUE(input.seek(cut));
+    auto requested = Page::deserializeForIdle(input, bytes.size());
+    ASSERT_NE(requested, nullptr);
+    EXPECT_STREQ(requested->footnotes[0].href, "#fn");
+    EXPECT_EQ(Storage.bytes("adjacent-pages"), bytes);
+  }
+}
+
+TEST_F(TextLayoutBackingTest, IdlePageRejectsTrailingSpanGarbageWhileTheRequestedPageKeepsItsOriginalRecords) {
+  auto bytes = persistedTextPageBytes();
+  const auto original = bytes;
+  bytes.push_back(0xa5);
+  Storage.put("idle-trailing", bytes);
+  FsFile input;
+  ASSERT_TRUE(Storage.openFileForRead("test", "idle-trailing", input));
+  EXPECT_EQ(Page::deserializeForIdle(input, bytes.size()), nullptr);
+  ASSERT_TRUE(input.seek(0));
+  auto requested = Page::deserialize(input);
+  ASSERT_NE(requested, nullptr);
+  EXPECT_EQ(idlePageBytes(*requested), original);
+}
+
+TEST_F(TextLayoutBackingTest, IdlePageShortReadsLeaveTheNormalRequestedPageAndAnchorsAvailable) {
+  const auto bytes = persistedTextPageBytes();
+  for (size_t cut = 0; cut < bytes.size(); ++cut) {
+    SCOPED_TRACE(cut);
+    Storage.put("idle-short-read", bytes);
+    Storage.data("idle-short-read").readFailAt = cut;
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "idle-short-read", input));
+    EXPECT_EQ(Page::deserializeForIdle(input, bytes.size()), nullptr);
+    Storage.data("idle-short-read").readFailAt = std::numeric_limits<size_t>::max();
+    ASSERT_TRUE(input.seek(0));
+    auto requested = Page::deserialize(input);
+    ASSERT_NE(requested, nullptr);
+    EXPECT_EQ(idlePageBytes(*requested), bytes);
+  }
+}
+
+TEST_F(TextLayoutBackingTest, IdlePageRejectsMalformedNestedCountsBooleanFlagsAndRubyLengths) {
+  const size_t line = 7;
+  const size_t table = line + readingAidCacheBytes().size() + 8;
+  const size_t nestedLine = table + 19;
+  const size_t footnotes = nestedLine + readingAidCacheBytes().size();
+  const size_t markers = footnotes + 2 + sizeof(FootnoteEntry);
+  const std::vector<std::pair<size_t, uint8_t>> corruptions = {{0, 0xff},
+                                                               {1, 0xff},
+                                                               {2, 0xff},
+                                                               {line, 0xff},
+                                                               {line + 1, 0xff},
+                                                               {line + 2, 2},
+                                                               {line + 6, 0xff},
+                                                               {line + 7, 0xff},
+                                                               {line + 39, 3},
+                                                               {line + 41, 2},
+                                                               {line + 46, 0xff},
+                                                               {line + 54, 2},
+                                                               {table + 7, 9},
+                                                               {table + 11, 65},
+                                                               {table + 14, 2},
+                                                               {table + 15, 9},
+                                                               {table + 16, 2},
+                                                               {table + 17, 0},
+                                                               {table + 18, 65},
+                                                               {nestedLine + 39, 3},
+                                                               {nestedLine + 46, 0xff},
+                                                               {footnotes, 17},
+                                                               {markers, 9}};
+  for (const auto& [offset, value] : corruptions) {
+    SCOPED_TRACE(offset);
+    auto bytes = persistedTextPageBytes();
+    bytes.at(offset) = value;
+    Storage.put("idle-corrupt", bytes);
+    FsFile input;
+    ASSERT_TRUE(Storage.openFileForRead("test", "idle-corrupt", input));
+    EXPECT_EQ(Page::deserializeForIdle(input, bytes.size()), nullptr);
+    EXPECT_EQ(Storage.bytes("idle-corrupt"), bytes);
+  }
+}
+
+TEST_F(TextLayoutBackingTest, IdlePageAcceptsTheExactSerializedByteLimitButDeclinesOneByteMore) {
+  const size_t fixedBytes = idlePageBytes(singleLineIdlePage("x")).size() - 1;
+  const std::string text(PageReadBudget::MAX_SERIALIZED_BYTES - fixedBytes, 'a');
+  const auto bytes = idlePageBytes(singleLineIdlePage(text));
+  ASSERT_EQ(bytes.size(), PageReadBudget::MAX_SERIALIZED_BYTES);
+  Storage.put("idle-byte-limit", bytes);
+  FsFile input;
+  ASSERT_TRUE(Storage.openFileForRead("test", "idle-byte-limit", input));
+  auto accepted = Page::deserializeForIdle(input, bytes.size());
+  ASSERT_NE(accepted, nullptr);
+  EXPECT_EQ(static_cast<const PageLine&>(*accepted->elements[0]).getBlock()->wordTextLen(0), text.size());
+  input.close();
+  const auto oversized = idlePageBytes(singleLineIdlePage(text + "b"));
+  ASSERT_EQ(oversized.size(), PageReadBudget::MAX_SERIALIZED_BYTES + 1);
+  Storage.put("idle-byte-limit", oversized);
+  ASSERT_TRUE(Storage.openFileForRead("test", "idle-byte-limit", input));
+  EXPECT_EQ(Page::deserializeForIdle(input, oversized.size()), nullptr);
+  ASSERT_TRUE(input.seek(0));
+  auto requested = Page::deserialize(input);
+  ASSERT_NE(requested, nullptr);
+  EXPECT_EQ(static_cast<const PageLine&>(*requested->elements[0]).getBlock()->wordTextLen(0), text.size() + 1);
+}
+
+TEST_F(TextLayoutBackingTest, IdlePageNestedAllocationsHonorTheExactAccountedByteAdmissionBoundary) {
+  const auto bytes = persistedTextPageBytes();
+  Storage.put("idle-charge-limit", bytes);
+  FsFile input;
+  ASSERT_TRUE(Storage.openFileForRead("test", "idle-charge-limit", input));
+  PageReadBudget initial(0, bytes.size());
+  auto page = Page::deserialize(input, &initial);
+  ASSERT_NE(page, nullptr);
+  const size_t required = initial.chargedBytes();
+  ASSERT_GT(required, 0U);
+  ASSERT_LE(required, PageReadBudget::MAX_ALLOCATION_CHARGE);
+  page.reset();
+  for (const size_t limit : {required - 1, required}) {
+    SCOPED_TRACE(limit);
+    ASSERT_TRUE(input.seek(0));
+    PageReadBudget budget(0, bytes.size(), limit);
+    auto restored = Page::deserialize(input, &budget);
+    EXPECT_EQ(restored != nullptr, limit == required);
+    EXPECT_LE(budget.chargedBytes(), limit);
+  }
+}
+
+TEST_F(TextLayoutBackingTest, IdlePageRejectsNestedAllocationAmplificationEvenWithinTheSerializedByteLimit) {
+  Page page;
+  const auto source = singleLineIdlePage("a");
+  const auto line = static_cast<const PageLine&>(*source.elements[0]).getBlock();
+  for (int i = 0; i < 96; ++i) page.elements.push_back(std::make_unique<PageLine>(line, 0, i));
+  const auto bytes = idlePageBytes(page);
+  ASSERT_LT(bytes.size(), PageReadBudget::MAX_SERIALIZED_BYTES);
+  Storage.put("idle-amplification", bytes);
+  FsFile input;
+  ASSERT_TRUE(Storage.openFileForRead("test", "idle-amplification", input));
+  EXPECT_EQ(Page::deserializeForIdle(input, bytes.size()), nullptr);
+  ASSERT_TRUE(input.seek(0));
+  auto requested = Page::deserialize(input);
+  ASSERT_NE(requested, nullptr);
+  EXPECT_EQ(requested->elements.size(), 96U);
+  EXPECT_EQ(static_cast<const PageLine&>(*requested->elements.back()).yPos, 95);
+}
+
+TEST_F(TextLayoutBackingTest, PreparedSuccessorIsConsumedOnceWithIdenticalConsumerRecords) {
+  IdlePagePreparation prepared;
+  const auto key = idleKey();
+  ASSERT_TRUE(prepared.retain(loadIdleFixture(), key, 64U * 1024U, 40U * 1024U));
+  auto page = prepared.take(key, 64U * 1024U, 40U * 1024U);
+  ASSERT_NE(page, nullptr);
+  EXPECT_EQ(idlePageBytes(*page), persistedTextPageBytes());
+  EXPECT_EQ(prepared.take(key, 64U * 1024U, 40U * 1024U), nullptr);
+}
+
+TEST_F(TextLayoutBackingTest, PreparedSuccessorRejectsEveryIdentityChangeIncludingAFullLayoutSignatureCollision) {
+  const auto key = idleKey();
+  std::vector<IdlePageKey> changed(21, key);
+  changed[0].book = nullptr;
+  changed[1].section = nullptr;
+  ++changed[2].sectionGeneration;
+  ++changed[3].spine;
+  --changed[4].page;  // Current-page redraw/backward turn, not the successor.
+  ++changed[5].page;  // Unrelated jump past the successor.
+  ++changed[6].fontGeneration;
+  ++changed[7].layout.fontId;
+  changed[8].layout.lineCompression = 1.0004f;
+  changed[9].layout.extraParagraphSpacing = true;
+  changed[10].layout.forceParagraphIndents = true;
+  ++changed[11].layout.paragraphAlignment;
+  ++changed[12].layout.viewportWidth;
+  ++changed[13].layout.viewportHeight;
+  changed[14].layout.hyphenationEnabled = true;
+  changed[15].layout.embeddedStyle = false;
+  ++changed[16].layout.imageRendering;
+  changed[17].layout.focusReadingEnabled = true;
+  changed[18].layout.guideReadingEnabled = true;
+  ++changed[19].layout.wordSpacing;
+  changed[20].layout.renderMode = EpubRenderMode::Light;
+  ASSERT_EQ(readerRenderSpecSignature(key.layout), readerRenderSpecSignature(changed[8].layout));
+  for (const auto& requested : changed) {
+    IdlePagePreparation prepared;
+    ASSERT_TRUE(prepared.retain(loadIdleFixture(), key, 80U * 1024U, 56U * 1024U));
+    EXPECT_EQ(prepared.take(requested, 80U * 1024U, 56U * 1024U), nullptr);
+    EXPECT_EQ(prepared.take(key, 80U * 1024U, 56U * 1024U), nullptr);
+  }
+}
+
+TEST_F(TextLayoutBackingTest, PreparedNonHitReleasesAllSharedPageBackingBeforeAForegroundFallback) {
+  const auto key = idleKey();
+  auto page = loadIdleFixture();
+  ASSERT_NE(page, nullptr);
+  std::weak_ptr<TextBlock> backing = static_cast<const PageLine&>(*page->elements[0]).getBlock();
+  IdlePagePreparation prepared;
+  ASSERT_TRUE(prepared.retain(std::move(page), key, 80U * 1024U, 56U * 1024U));
+  auto redraw = key;
+  --redraw.page;
+  EXPECT_EQ(prepared.take(redraw, 80U * 1024U, 56U * 1024U), nullptr);
+  EXPECT_TRUE(backing.expired());
+  auto fallback = loadIdleFixture();
+  ASSERT_NE(fallback, nullptr);
+  EXPECT_EQ(idlePageBytes(*fallback), persistedTextPageBytes());
+}
+
+TEST_F(TextLayoutBackingTest, PreparedSuccessorRequiresBothFreeAndContiguousAdmissionAndRetentionFloors) {
+  EXPECT_TRUE(IdlePagePreparation::canPrepare(80U * 1024U, 56U * 1024U));
+  EXPECT_FALSE(IdlePagePreparation::canPrepare(80U * 1024U - 1, 128U * 1024U));
+  EXPECT_FALSE(IdlePagePreparation::canPrepare(128U * 1024U, 56U * 1024U - 1));
+  const std::pair<uint32_t, uint32_t> pressured[] = {{64U * 1024U - 1, 80U * 1024U}, {80U * 1024U, 40U * 1024U - 1}};
+  for (const auto& [free, contiguous] : pressured) {
+    const auto key = idleKey();
+    IdlePagePreparation prepared;
+    EXPECT_FALSE(prepared.retain(loadIdleFixture(), key, free, contiguous));
+    EXPECT_EQ(prepared.take(key, 80U * 1024U, 56U * 1024U), nullptr);
+    auto page = loadIdleFixture();
+    ASSERT_NE(page, nullptr);
+    std::weak_ptr<TextBlock> backing = static_cast<const PageLine&>(*page->elements[0]).getBlock();
+    ASSERT_TRUE(prepared.retain(std::move(page), key, 80U * 1024U, 56U * 1024U));
+    prepared.discardUnderPressure(free, contiguous);
+    EXPECT_TRUE(backing.expired());
+    EXPECT_EQ(prepared.take(key, 80U * 1024U, 56U * 1024U), nullptr);
+    ASSERT_TRUE(prepared.retain(loadIdleFixture(), key, 80U * 1024U, 56U * 1024U));
+    EXPECT_EQ(prepared.take(key, free, contiguous), nullptr);
+    EXPECT_EQ(prepared.take(key, 80U * 1024U, 56U * 1024U), nullptr);
+  }
+}
+
+TEST_F(TextLayoutBackingTest, PreparedNavigationKeepsTheForwardSuccessorButReleasesBackwardResidencyImmediately) {
+  std::mutex readerMutex;
+  for (const bool forward : {true, false}) {
+    IdlePagePreparation prepared;
+    const auto key = idleKey();
+    auto page = loadIdleFixture();
+    ASSERT_NE(page, nullptr);
+    std::weak_ptr<TextBlock> backing = static_cast<const PageLine&>(*page->elements[0]).getBlock();
+    ASSERT_TRUE(prepared.retain(std::move(page), key, 80U * 1024U, 56U * 1024U));
+    prepared.beforePageTurn(forward, [&readerMutex] { return std::unique_lock<std::mutex>(readerMutex); });
+    EXPECT_EQ(backing.expired(), !forward);
+    auto consumed = prepared.take(key, 80U * 1024U, 56U * 1024U);
+    EXPECT_EQ(consumed != nullptr, forward);
+  }
+}
+
+TEST_F(TextLayoutBackingTest, PreparedLoaderReturnsExactPreparedRecordsOnceThenTheRealForegroundResult) {
+  IdlePagePreparation prepared;
+  const auto key = idleKey();
+  ASSERT_TRUE(prepared.retain(loadIdleFixture(), key, 80U * 1024U, 56U * 1024U));
+  const auto fallbackBytes = idlePageBytes(singleLineIdlePage("foreground"));
+  Storage.put("foreground-page", fallbackBytes);
+  const auto foreground = [] {
+    FsFile input;
+    if (!Storage.openFileForRead("test", "foreground-page", input)) return std::unique_ptr<Page>{};
+    return Page::deserialize(input);
+  };
+  auto first = prepared.load(key, 80U * 1024U, 56U * 1024U, foreground);
+  ASSERT_NE(first, nullptr);
+  EXPECT_EQ(idlePageBytes(*first), persistedTextPageBytes());
+  first.reset();
+  auto second = prepared.load(key, 80U * 1024U, 56U * 1024U, foreground);
+  ASSERT_NE(second, nullptr);
+  EXPECT_EQ(idlePageBytes(*second), fallbackBytes);
+}
+
+TEST_F(TextLayoutBackingTest, PreparedLoaderReclaimsMismatchedAndPressuredBackingBeforeDeserializingForeground) {
+  const auto key = idleKey();
+  for (const int scenario : {0, 1, 2}) {
+    IdlePagePreparation prepared;
+    auto page = loadIdleFixture();
+    ASSERT_NE(page, nullptr);
+    std::weak_ptr<TextBlock> backing = static_cast<const PageLine&>(*page->elements[0]).getBlock();
+    ASSERT_TRUE(prepared.retain(std::move(page), key, 80U * 1024U, 56U * 1024U));
+    auto requested = key;
+    if (scenario == 0) --requested.page;
+    const uint32_t free = scenario == 1 ? 64U * 1024U - 1 : 80U * 1024U;
+    const uint32_t contiguous = scenario == 2 ? 40U * 1024U - 1 : 56U * 1024U;
+    auto foreground = prepared.load(requested, free, contiguous, [&backing] {
+      EXPECT_TRUE(backing.expired());
+      return loadIdleFixture();
+    });
+    ASSERT_NE(foreground, nullptr);
+    EXPECT_EQ(idlePageBytes(*foreground), persistedTextPageBytes());
+    EXPECT_EQ(prepared.take(key, 80U * 1024U, 56U * 1024U), nullptr);
+  }
+}
+#endif

@@ -148,6 +148,9 @@ class Section {
   std::unique_ptr<Page> loadPage(int page);
 
   std::unique_ptr<Page> loadPageFromSectionFile();
+  // Read only a committed page for optional idle work. Every nested read and
+  // allocation is bounded; declining this path never changes requested reads.
+  std::unique_ptr<Page> loadPageForIdle(int page) const;
 
   // Resolve an anchor from the in-progress build first, then the on-disk anchor map
   // (covers finalized sections and partials from a previous session).

@@ -33,10 +33,15 @@ bool Page::serialize(FsFile& file) const {
   return serialization::tryWritePod(file, marker);
 }
 
-std::unique_ptr<Page> Page::deserialize(FsFile& file) {
+std::unique_ptr<Page> Page::deserialize(FsFile& file, PageReadBudget*) {
   uint32_t marker = 0;
   if (!serialization::tryReadPod(file, marker) || marker != 0x50414745) return nullptr;
   return std::make_unique<Page>();
+}
+
+std::unique_ptr<Page> Page::deserializeForIdle(FsFile& file, const size_t pageEnd) {
+  auto page = deserialize(file);
+  return file.position() == pageEnd ? std::move(page) : nullptr;
 }
 
 uint16_t Page::imageEstimateUnits(uint16_t, uint16_t) const { return 0; }

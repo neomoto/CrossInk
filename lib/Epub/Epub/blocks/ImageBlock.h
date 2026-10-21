@@ -6,6 +6,8 @@
 
 #include "Block.h"
 
+class PageReadBudget;
+
 class ImageBlock final : public Block {
  public:
   ImageBlock(std::string imagePath, std::string sourcePath, int16_t width, int16_t height);
@@ -35,7 +37,7 @@ class ImageBlock final : public Block {
 
   void render(GfxRenderer& renderer, const int x, const int y, const bool foregroundBlack);
   bool serialize(FsFile& file);
-  static std::unique_ptr<ImageBlock> deserialize(FsFile& file);
+  static std::unique_ptr<ImageBlock> deserialize(FsFile& file, PageReadBudget* budget = nullptr);
 
  private:
   std::string imagePath;

@@ -4,6 +4,7 @@
 #include <Logging.h>
 #include <Serialization.h>
 
+#include "PageReadBudget.h"
 #include "tables/TableColumnLayout.h"
 #include "tables/TableTextLineOrder.h"
 
@@ -63,20 +64,23 @@ bool PageLine::serialize(FsFile& file) {
   return block->serialize(file);
 }
 
-std::unique_ptr<PageLine> PageLine::deserialize(FsFile& file) {
+std::unique_ptr<PageLine> PageLine::deserialize(FsFile& file, PageReadBudget* budget) {
   int16_t xPos;
   int16_t yPos;
-  if (!serialization::tryReadPodGroup(file, xPos, yPos)) {
+  if (!readPagePodGroup(file, budget, xPos, yPos)) {
     LOG_ERR("PGE", "Deserialization failed: truncated PageLine coordinates");
     return nullptr;
   }
 
-  auto tb = TextBlock::deserialize(file);
+  auto tb = TextBlock::deserialize(file, budget);
   if (!tb) {
     LOG_ERR("PGE", "Deserialization failed: PageLine text block was invalid");
     return nullptr;
   }
 
+  if (!chargePageAllocation(budget, sizeof(PageLine)) ||
+      !chargePageAllocation(budget, PageReadBudget::SHARED_CONTROL_BLOCK_BYTES))
+    return nullptr;
   auto* pageLine = new (std::nothrow) PageLine(std::move(tb), xPos, yPos);
   if (!pageLine) {
     LOG_ERR("PGE", "Deserialization failed: could not allocate PageLine");
@@ -107,21 +111,22 @@ bool PageImage::serialize(FsFile& file) {
   return imageBlock->serialize(file);
 }
 
-std::unique_ptr<PageImage> PageImage::deserialize(FsFile& file) {
+std::unique_ptr<PageImage> PageImage::deserialize(FsFile& file, PageReadBudget* budget) {
   int16_t xPos;
   int16_t yPos;
   uint8_t inlineFlag;
-  if (!serialization::tryReadPodGroup(file, xPos, yPos, inlineFlag) || inlineFlag > 1) {
+  if (!readPagePodGroup(file, budget, xPos, yPos, inlineFlag) || inlineFlag > 1) {
     LOG_ERR("PGE", "Deserialization failed: truncated PageImage coordinates");
     return nullptr;
   }
 
-  auto ib = ImageBlock::deserialize(file);
+  auto ib = ImageBlock::deserialize(file, budget);
   if (!ib) {
     LOG_ERR("PGE", "Deserialization failed: PageImage block was invalid");
     return nullptr;
   }
 
+  if (!chargePageAllocation(budget, sizeof(PageImage))) return nullptr;
   auto* pageImage = new (std::nothrow) PageImage(std::move(ib), xPos, yPos, inlineFlag != 0);
   if (!pageImage) {
     LOG_ERR("PGE", "Deserialization failed: could not allocate PageImage");
@@ -145,12 +150,12 @@ bool PageHorizontalRule::serialize(FsFile& file) {
   return serialization::tryWritePodGroup(file, xPos, yPos, width, thickness);
 }
 
-std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(FsFile& file) {
+std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(FsFile& file, PageReadBudget* budget) {
   int16_t xPos = 0;
   int16_t yPos = 0;
   uint16_t width = 0;
   uint8_t thickness = 0;
-  if (!serialization::tryReadPodGroup(file, xPos, yPos, width, thickness)) {
+  if (!readPagePodGroup(file, budget, xPos, yPos, width, thickness)) {
     LOG_ERR("PGE", "Deserialization failed: truncated PageHorizontalRule metadata");
     return nullptr;
   }
@@ -161,6 +166,7 @@ std::unique_ptr<PageHorizontalRule> PageHorizontalRule::deserialize(FsFile& file
     return nullptr;
   }
 
+  if (!chargePageAllocation(budget, sizeof(PageHorizontalRule))) return nullptr;
   auto* rule = new (std::nothrow) PageHorizontalRule(width, thickness, xPos, yPos);
   if (!rule) {
     LOG_ERR("PGE", "Deserialization failed: could not allocate PageHorizontalRule");
@@ -189,9 +195,9 @@ bool TableFragmentCell::serialize(FsFile& file) const {
   return true;
 }
 
-bool TableFragmentCell::deserialize(FsFile& file, TableFragmentCell& outCell) {
+bool TableFragmentCell::deserialize(FsFile& file, TableFragmentCell& outCell, PageReadBudget* budget) {
   uint8_t lineCount = 0;
-  if (!serialization::tryReadPodGroup(file, outCell.isHeader, outCell.colSpan, lineCount)) {
+  if (!readPagePodGroup(file, budget, outCell.isHeader, outCell.colSpan, lineCount)) {
     LOG_ERR("PTB", "Deserialization failed: truncated table cell metadata");
     return false;
   }
@@ -201,10 +207,12 @@ bool TableFragmentCell::deserialize(FsFile& file, TableFragmentCell& outCell) {
     return false;
   }
 
+  if (!chargePageAllocation(budget, lineCount * sizeof(std::shared_ptr<TextBlock>))) return false;
   outCell.lines.clear();
   outCell.lines.reserve(lineCount);
   for (uint8_t i = 0; i < lineCount; i++) {
-    auto line = TextBlock::deserialize(file);
+    if (!chargePageAllocation(budget, PageReadBudget::SHARED_CONTROL_BLOCK_BYTES)) return false;
+    auto line = TextBlock::deserialize(file, budget);
     if (!line) {
       LOG_ERR("PTB", "Deserialization failed: invalid table cell line");
       return false;
@@ -240,9 +248,9 @@ bool TableFragmentRow::serialize(FsFile& file) const {
   return true;
 }
 
-bool TableFragmentRow::deserialize(FsFile& file, TableFragmentRow& outRow) {
+bool TableFragmentRow::deserialize(FsFile& file, TableFragmentRow& outRow, PageReadBudget* budget) {
   uint8_t cellCount = 0;
-  if (!serialization::tryReadPodGroup(file, outRow.height, outRow.headerSeparator, cellCount)) {
+  if (!readPagePodGroup(file, budget, outRow.height, outRow.headerSeparator, cellCount)) {
     LOG_ERR("PTB", "Deserialization failed: truncated table row metadata");
     return false;
   }
@@ -251,12 +259,13 @@ bool TableFragmentRow::deserialize(FsFile& file, TableFragmentRow& outRow) {
     return false;
   }
 
+  if (!chargePageAllocation(budget, cellCount * sizeof(TableFragmentCell))) return false;
   outRow.cells.clear();
   outRow.cells.reserve(cellCount);
   uint8_t logicalColumns = 0;
   for (uint8_t i = 0; i < cellCount; i++) {
     TableFragmentCell cell;
-    if (!TableFragmentCell::deserialize(file, cell)) {
+    if (!TableFragmentCell::deserialize(file, cell, budget)) {
       return false;
     }
     if (static_cast<uint8_t>(logicalColumns + cell.colSpan) > MAX_TABLE_CELLS_PER_ROW) {
@@ -431,7 +440,7 @@ bool PageTableFragment::serialize(FsFile& file) {
   return true;
 }
 
-std::unique_ptr<PageTableFragment> PageTableFragment::deserialize(FsFile& file) {
+std::unique_ptr<PageTableFragment> PageTableFragment::deserialize(FsFile& file, PageReadBudget* budget) {
   int16_t xPos = 0;
   int16_t yPos = 0;
   uint16_t width = 0;
@@ -439,7 +448,7 @@ std::unique_ptr<PageTableFragment> PageTableFragment::deserialize(FsFile& file) 
   uint8_t cellPadding = 0;
   uint16_t lineHeight = 0;
   uint8_t rowCount = 0;
-  if (!serialization::tryReadPodGroup(file, xPos, yPos, width, columnCount, cellPadding, lineHeight, rowCount)) {
+  if (!readPagePodGroup(file, budget, xPos, yPos, width, columnCount, cellPadding, lineHeight, rowCount)) {
     LOG_ERR("PTB", "Deserialization failed: truncated fragment metadata");
     return nullptr;
   }
@@ -448,16 +457,18 @@ std::unique_ptr<PageTableFragment> PageTableFragment::deserialize(FsFile& file) 
     return nullptr;
   }
 
+  if (!chargePageAllocation(budget, rowCount * sizeof(TableFragmentRow))) return nullptr;
   std::vector<TableFragmentRow> rows;
   rows.reserve(rowCount);
   for (uint8_t i = 0; i < rowCount; i++) {
     TableFragmentRow row;
-    if (!TableFragmentRow::deserialize(file, row)) {
+    if (!TableFragmentRow::deserialize(file, row, budget)) {
       return nullptr;
     }
     rows.push_back(std::move(row));
   }
 
+  if (!chargePageAllocation(budget, sizeof(PageTableFragment))) return nullptr;
   auto* fragment =
       new (std::nothrow) PageTableFragment(width, columnCount, cellPadding, lineHeight, std::move(rows), xPos, yPos);
   if (!fragment) {
@@ -604,106 +615,100 @@ bool Page::serialize(FsFile& file) const {
   return true;
 }
 
-std::unique_ptr<Page> Page::deserialize(FsFile& file) {
+namespace {
+
+std::unique_ptr<PageElement> readPageElement(FsFile& file, const uint8_t tag, PageReadBudget* budget) {
+  switch (tag) {
+    case TAG_PageLine:
+      return PageLine::deserialize(file, budget);
+    case TAG_PageImage:
+      return PageImage::deserialize(file, budget);
+    case TAG_PageTableFragment:
+      return PageTableFragment::deserialize(file, budget);
+    case TAG_PageHorizontalRule:
+      return PageHorizontalRule::deserialize(file, budget);
+    default:
+      LOG_ERR("PGE", "Deserialization failed: Unknown tag %u", tag);
+      return nullptr;
+  }
+}
+
+bool readPageElements(FsFile& file, Page& page, PageReadBudget* budget) {
+  uint16_t count = 0;
+  if (!readPagePodGroup(file, budget, count) || count > MAX_PAGE_ELEMENTS) {
+    LOG_ERR("PGE", "Deserialization failed: invalid element count %u", count);
+    return false;
+  }
+  if (!chargePageAllocation(budget, count * sizeof(std::unique_ptr<PageElement>))) return false;
+  page.elements.reserve(count);
+  for (uint16_t i = 0; i < count; ++i) {
+    uint8_t tag = 0;
+    if (!readPagePodGroup(file, budget, tag)) return false;
+    auto element = readPageElement(file, tag, budget);
+    if (!element) return false;
+    page.elements.push_back(std::move(element));
+  }
+  return true;
+}
+
+bool readPageFootnotes(FsFile& file, Page& page, PageReadBudget* budget) {
+  uint16_t count = 0;
+  if (!readPagePodGroup(file, budget, count) || count > Page::MAX_FOOTNOTES_PER_PAGE) {
+    LOG_ERR("PGE", "Invalid or truncated footnote count %u", count);
+    return false;
+  }
+  if (!chargePageAllocation(budget, count * sizeof(FootnoteEntry))) return false;
+  page.footnotes.resize(count);
+  for (auto& entry : page.footnotes) {
+    if (!readPageBytes(file, budget, entry.number, sizeof(entry.number)) ||
+        !readPageBytes(file, budget, entry.href, sizeof(entry.href)) || !readPagePodGroup(file, budget, entry.linkId))
+      return false;
+    entry.number[sizeof(entry.number) - 1] = '\0';
+    entry.href[sizeof(entry.href) - 1] = '\0';
+  }
+  return true;
+}
+
+bool readPublisherPageMarkers(FsFile& file, Page& page, PageReadBudget* budget) {
+  uint8_t count = 0;
+  if (!readPagePodGroup(file, budget, count) || count > Page::MAX_PUBLISHER_PAGE_MARKERS_PER_PAGE) {
+    LOG_ERR("PGE", "Invalid or truncated publisher page marker count %u", count);
+    return false;
+  }
+  if (!chargePageAllocation(budget, count * sizeof(Page::PublisherPageMarker))) return false;
+  page.publisherPageMarkers.reserve(count);
+  for (uint8_t i = 0; i < count; ++i) {
+    Page::PublisherPageMarker marker;
+    if (!readPagePodGroup(file, budget, marker.yPos) ||
+        !readPageBytes(file, budget, marker.label, sizeof(marker.label)))
+      return false;
+    marker.label[sizeof(marker.label) - 1] = '\0';
+    page.publisherPageMarkers.push_back(marker);
+  }
+  return true;
+}
+
+}  // namespace
+
+std::unique_ptr<Page> Page::deserialize(FsFile& file, PageReadBudget* budget) {
+  if (!chargePageAllocation(budget, sizeof(Page))) return nullptr;
   auto* rawPage = new (std::nothrow) Page();
   if (!rawPage) {
     LOG_ERR("PGE", "Deserialization failed: could not allocate Page");
     return nullptr;
   }
   auto page = std::unique_ptr<Page>(rawPage);
-
-  uint16_t count;
-  if (!serialization::tryReadPod(file, count)) {
-    LOG_ERR("PGE", "Deserialization failed: could not read element count");
+  if (!readPageElements(file, *page, budget) || !readPageFootnotes(file, *page, budget) ||
+      !readPublisherPageMarkers(file, *page, budget))
     return nullptr;
-  }
-  if (count > MAX_PAGE_ELEMENTS) {
-    LOG_ERR("PGE", "Deserialization failed: element count %u exceeds maximum", count);
-    return nullptr;
-  }
-  page->elements.reserve(count);
+  return page;
+}
 
-  for (uint16_t i = 0; i < count; i++) {
-    uint8_t tag;
-    if (!serialization::tryReadPod(file, tag)) {
-      LOG_ERR("PGE", "Deserialization failed: truncated element tag");
-      return nullptr;
-    }
-
-    if (tag == TAG_PageLine) {
-      auto pl = PageLine::deserialize(file);
-      if (!pl) {
-        return nullptr;
-      }
-      page->elements.push_back(std::move(pl));
-    } else if (tag == TAG_PageImage) {
-      auto pi = PageImage::deserialize(file);
-      if (!pi) {
-        return nullptr;
-      }
-      page->elements.push_back(std::move(pi));
-    } else if (tag == TAG_PageTableFragment) {
-      auto fragment = PageTableFragment::deserialize(file);
-      if (!fragment) {
-        return nullptr;
-      }
-      page->elements.push_back(std::move(fragment));
-    } else if (tag == TAG_PageHorizontalRule) {
-      auto rule = PageHorizontalRule::deserialize(file);
-      if (!rule) {
-        return nullptr;
-      }
-      page->elements.push_back(std::move(rule));
-    } else {
-      LOG_ERR("PGE", "Deserialization failed: Unknown tag %u", tag);
-      return nullptr;
-    }
-  }
-
-  // Deserialize footnotes
-  uint16_t fnCount;
-  if (!serialization::tryReadPod(file, fnCount)) {
-    LOG_ERR("PGE", "Failed to read footnote count");
-    return nullptr;
-  }
-  if (fnCount > MAX_FOOTNOTES_PER_PAGE) {
-    LOG_ERR("PGE", "Invalid footnote count %u", fnCount);
-    return nullptr;
-  }
-  page->footnotes.resize(fnCount);
-  for (uint16_t i = 0; i < fnCount; i++) {
-    auto& entry = page->footnotes[i];
-    if (file.read(entry.number, sizeof(entry.number)) != sizeof(entry.number) ||
-        file.read(entry.href, sizeof(entry.href)) != sizeof(entry.href) ||
-        !serialization::tryReadPod(file, entry.linkId)) {
-      LOG_ERR("PGE", "Failed to read footnote %u", i);
-      return nullptr;
-    }
-    entry.number[sizeof(entry.number) - 1] = '\0';
-    entry.href[sizeof(entry.href) - 1] = '\0';
-  }
-
-  uint8_t markerCount;
-  if (!serialization::tryReadPod(file, markerCount)) {
-    LOG_ERR("PGE", "Failed to read publisher page marker count");
-    return nullptr;
-  }
-  if (markerCount > MAX_PUBLISHER_PAGE_MARKERS_PER_PAGE) {
-    LOG_ERR("PGE", "Invalid publisher page marker count %u", markerCount);
-    return nullptr;
-  }
-  page->publisherPageMarkers.reserve(markerCount);
-  for (uint8_t i = 0; i < markerCount; i++) {
-    Page::PublisherPageMarker marker;
-    if (!serialization::tryReadPod(file, marker.yPos) ||
-        file.read(marker.label, sizeof(marker.label)) != sizeof(marker.label)) {
-      LOG_ERR("PGE", "Failed to read publisher page marker %u", i);
-      return nullptr;
-    }
-    marker.label[sizeof(marker.label) - 1] = '\0';
-    page->publisherPageMarkers.push_back(marker);
-  }
-
+std::unique_ptr<Page> Page::deserializeForIdle(FsFile& file, const size_t pageEnd) {
+  PageReadBudget budget(file.position(), pageEnd);
+  if (!budget.valid()) return nullptr;
+  auto page = deserialize(file, &budget);
+  if (file.position() != pageEnd) return nullptr;
   return page;
 }
 

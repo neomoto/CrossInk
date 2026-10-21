@@ -809,20 +809,101 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   }
 }
 
+// Optional-menu context deferral adapted from Sichroteph/YACP commit
+// 23568ad3580740068cd3466f400b6900f08a1a15 (MIT). Stats used by Home stay
+// eager; refresh these presence flags on each menu opening, without a loaded flag.
+void HomeActivity::loadHomeMenuContext() {
+  hasOpdsServers = OPDS_STORE.hasServers();
+  hasBookmarks = BookmarkStore::hasAnyBookmarks();
+  hasClippings = ClippingStore::hasAnyClippings();
+}
+
+void HomeActivity::initializeHomeMenuContext() {
+  hasOpdsServers = false;
+  hasBookmarks = false;
+  hasClippings = false;
+  if (!usesMinimalHomeInteraction() || initialMenuItem != HomeMenuItem::NONE) {
+    loadHomeMenuContext();
+  }
+}
+
+void HomeActivity::openMinimalMenu() {
+  loadHomeMenuContext();
+  minimalMenuOpen = true;
+  minimalMenuIndex = 0;
+  requestUpdate();
+}
+
+bool HomeActivity::selectInitialBook(const std::string& path, const ThemeMetrics& metrics) {
+  if (path.empty()) {
+    return false;
+  }
+
+  for (int i = 0; i < static_cast<int>(recentBooks.size()); ++i) {
+    if (recentBooks[i].path == path) {
+      if (metrics.homeRecentBooksCount == 1 && i > 0 && !coverGridUi) {
+        std::rotate(recentBooks.begin(), recentBooks.begin() + i, recentBooks.end());
+        selectorIndex = 0;
+        lastCarouselBookIndex = 0;
+      } else {
+        selectorIndex = i;
+        lastCarouselBookIndex = i;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+void HomeActivity::selectInitialCoverGridMenuItem() {
+  const int base = static_cast<int>(recentBooks.size());
+  switch (initialMenuItem) {
+    case HomeMenuItem::FILE_BROWSER:
+      selectorIndex = base;
+      break;
+    case HomeMenuItem::LIBRARY:
+      selectorIndex = base + 1;
+      break;
+    case HomeMenuItem::OPDS_BROWSER:
+      selectorIndex = base + 2;
+      break;
+    case HomeMenuItem::FILE_TRANSFER:
+      selectorIndex = base + (hasOpdsServers ? 3 : 2);
+      break;
+    case HomeMenuItem::SETTINGS_MENU:
+      selectorIndex = base + (hasOpdsServers ? 4 : 3);
+      break;
+    case HomeMenuItem::NONE:
+      break;
+  }
+}
+
+void HomeActivity::initializeHomeMenu(const ThemeMetrics& metrics) {
+  if (coverGridUi) {
+    selectInitialCoverGridMenuItem();
+    coverGridUi->begin(recentBooks, hasOpdsServers, gridHasContinueReading,
+                       gridHasContinueReading ? loadRecentBookProgress(recentBooks.front()) : -1.0f);
+  } else if (initialMenuItem != HomeMenuItem::NONE) {
+    const bool includeContinueReading = metrics.homeContinueReadingInMenu && !recentBooks.empty();
+    const auto menuItems = buildSelectableHomeMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings,
+                                                        includeContinueReading);
+    const int menuIndex = findMenuActionIndex(menuItems, homeActionForInitialMenuItem(initialMenuItem));
+    if (menuIndex >= 0) {
+      selectorIndex = getHomeMenuSelectionOffset(recentBooks) + menuIndex;
+    }
+  }
+}
+
 void HomeActivity::onEnter() {
   Activity::onEnter();
 
-  hasOpdsServers = OPDS_STORE.hasServers();
+  initializeHomeMenuContext();
   if (UITheme::hasCoverGridHome()) {
     coverGridUi = makeUniqueNoThrow<CoverGridHomeUi>(renderer);
     if (!coverGridUi) LOG_ERR("HOME", "Cannot allocate cover grid UI; using standard Home");
   }
   const bool isCarouselTheme =
       static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL;
-
-  // Check if any books have bookmarks (directory scan only, no file parsing)
-  hasBookmarks = BookmarkStore::hasAnyBookmarks();
-  hasClippings = ClippingStore::hasAnyClippings();
 
   selectorIndex = 0;
   lastCarouselBookIndex = 0;
@@ -845,29 +926,8 @@ void HomeActivity::onEnter() {
   loadRecentBooks(recentBooksToLoad);
   gridHasContinueReading = !recentBooks.empty();
 
-  const auto selectInitialBook = [this, &metrics](const std::string& path) {
-    if (path.empty()) {
-      return false;
-    }
-
-    for (int i = 0; i < static_cast<int>(recentBooks.size()); ++i) {
-      if (recentBooks[i].path == path) {
-        if (metrics.homeRecentBooksCount == 1 && i > 0 && !coverGridUi) {
-          std::rotate(recentBooks.begin(), recentBooks.begin() + i, recentBooks.end());
-          selectorIndex = 0;
-          lastCarouselBookIndex = 0;
-        } else {
-          selectorIndex = i;
-          lastCarouselBookIndex = i;
-        }
-        return true;
-      }
-    }
-    return false;
-  };
-
-  if (!selectInitialBook(initialBookPath)) {
-    selectInitialBook(APP_STATE.openEpubPath);
+  if (!selectInitialBook(initialBookPath, metrics)) {
+    selectInitialBook(APP_STATE.openEpubPath, metrics);
   }
 
   globalStats = GlobalReadingStats::load();
@@ -878,38 +938,7 @@ void HomeActivity::onEnter() {
   }
   updateHighlightedBookContext(false);
 
-  if (coverGridUi) {
-    const int base = static_cast<int>(recentBooks.size());
-    switch (initialMenuItem) {
-      case HomeMenuItem::FILE_BROWSER:
-        selectorIndex = base;
-        break;
-      case HomeMenuItem::LIBRARY:
-        selectorIndex = base + 1;
-        break;
-      case HomeMenuItem::OPDS_BROWSER:
-        selectorIndex = base + 2;
-        break;
-      case HomeMenuItem::FILE_TRANSFER:
-        selectorIndex = base + (hasOpdsServers ? 3 : 2);
-        break;
-      case HomeMenuItem::SETTINGS_MENU:
-        selectorIndex = base + (hasOpdsServers ? 4 : 3);
-        break;
-      case HomeMenuItem::NONE:
-        break;
-    }
-    coverGridUi->begin(recentBooks, hasOpdsServers, gridHasContinueReading,
-                       gridHasContinueReading ? loadRecentBookProgress(recentBooks.front()) : -1.0f);
-  } else if (initialMenuItem != HomeMenuItem::NONE) {
-    const bool includeContinueReading = metrics.homeContinueReadingInMenu && !recentBooks.empty();
-    const auto menuItems = buildSelectableHomeMenuItems(hasOpdsServers, hasReadingStats, hasBookmarks, hasClippings,
-                                                        includeContinueReading);
-    const int menuIndex = findMenuActionIndex(menuItems, homeActionForInitialMenuItem(initialMenuItem));
-    if (menuIndex >= 0) {
-      selectorIndex = getHomeMenuSelectionOffset(recentBooks) + menuIndex;
-    }
-  }
+  initializeHomeMenu(metrics);
 
   if (isCarouselTheme && hasValidCarouselDiskCache(recentBooks, renderer, getHighlightedBookIndex())) {
     preRenderCarouselFrames();
@@ -1536,9 +1565,7 @@ void HomeActivity::loop() {
         return;
       case MappedInputManager::SwipeDir::Up:
         minimalHomeNavIndex = 0;
-        minimalMenuOpen = true;
-        minimalMenuIndex = 0;
-        requestUpdate();
+        openMinimalMenu();
         return;
       case MappedInputManager::SwipeDir::Left:
         if (mappedInput.hasTouch() && canSwapHomeBook()) {
@@ -1583,9 +1610,7 @@ void HomeActivity::loop() {
     auto activateMinimalHomeNav = [this](int index) {
       switch (index) {
         case 0:
-          minimalMenuOpen = true;
-          minimalMenuIndex = 0;
-          requestUpdate();
+          openMinimalMenu();
           break;
         case 1:
           onMinimalBrowseOpen();

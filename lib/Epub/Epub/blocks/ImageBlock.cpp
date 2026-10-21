@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <utility>
 
+#include "../PageReadBudget.h"
 #include "Epub/converters/DirectPixelWriter.h"
 #include "Epub/converters/ImageDecoderFactory.h"
 
@@ -577,23 +578,24 @@ bool ImageBlock::serialize(FsFile& file) {
          serialization::tryWritePodGroup(file, width, height);
 }
 
-std::unique_ptr<ImageBlock> ImageBlock::deserialize(FsFile& file) {
+std::unique_ptr<ImageBlock> ImageBlock::deserialize(FsFile& file, PageReadBudget* budget) {
   std::string path;
-  if (!serialization::tryReadString(file, path)) {
+  if (!readPageString(file, budget, path)) {
     LOG_ERR("IMG", "Deserialization failed: could not read image path");
     return nullptr;
   }
   std::string source;
-  if (!serialization::tryReadString(file, source)) {
+  if (!readPageString(file, budget, source)) {
     LOG_ERR("IMG", "Deserialization failed: could not read image source path");
     return nullptr;
   }
   int16_t w, h;
-  if (!serialization::tryReadPod(file, w) || !serialization::tryReadPod(file, h)) {
+  if (!readPagePodGroup(file, budget, w) || !readPagePodGroup(file, budget, h)) {
     LOG_ERR("IMG", "Deserialization failed: truncated image metadata");
     return nullptr;
   }
 
+  if (!chargePageAllocation(budget, sizeof(ImageBlock))) return nullptr;
   auto* imageBlock = new (std::nothrow) ImageBlock(std::move(path), std::move(source), w, h);
   if (!imageBlock) {
     LOG_ERR("IMG", "Deserialization failed: could not allocate ImageBlock");

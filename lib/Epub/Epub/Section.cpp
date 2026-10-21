@@ -55,6 +55,26 @@ constexpr char SECTION_ALTERNATE_SUFFIX[] = ".alt.bin";
 constexpr size_t SECTION_HTML_STREAM_CHUNK_SIZE = 8192;
 constexpr size_t LOW_MEMORY_SECTION_HTML_STREAM_CHUNK_SIZE = 1024;
 
+std::optional<uint32_t> readIdlePageLut(FsFile& file, const uint16_t pageCount) {
+  if (!file.seek(HEADER_SIZE - sizeof(uint32_t) * 5)) return std::nullopt;
+  uint32_t lut = 0;
+  if (!serialization::tryReadPod(file, lut) || lut < HEADER_SIZE || lut > file.size()) return std::nullopt;
+  const size_t lutBytes = static_cast<size_t>(pageCount) * sizeof(uint32_t);
+  if (lutBytes > file.size() - lut) return std::nullopt;
+  return lut;
+}
+
+bool seekIdlePageSpan(FsFile& file, const uint16_t pageCount, const int page, uint32_t& pageEnd) {
+  const auto lut = readIdlePageLut(file, pageCount);
+  if (!lut || !file.seek(*lut + static_cast<size_t>(page) * sizeof(uint32_t))) return false;
+  uint32_t pageStart = 0;
+  if (!serialization::tryReadPod(file, pageStart)) return false;
+  pageEnd = *lut;
+  if (page + 1 < pageCount && !serialization::tryReadPod(file, pageEnd)) return false;
+  if (pageStart < HEADER_SIZE || pageStart >= pageEnd || pageEnd > *lut) return false;
+  return file.seek(pageStart);
+}
+
 void prepareSectionZipInflate(GfxRenderer& renderer, const int fontId) {
   if (ESP.getMaxAllocHeap() < InflateStream::requiredInternalStorageSize(true) && renderer.isSdCardFont(fontId)) {
     renderer.releaseSdCardFontForLowMemory(fontId);
@@ -1465,6 +1485,19 @@ std::unique_ptr<Page> Section::loadPage(const int page) {
 }
 
 std::unique_ptr<Page> Section::loadPageFromSectionFile() { return loadPage(currentPage); }
+
+std::unique_ptr<Page> Section::loadPageForIdle(const int page) const {
+  if (build_ || page < 0 || page >= pageCount) return nullptr;
+  HalFile input;
+  if (!openCacheForRead(input)) return nullptr;
+  uint32_t pageEnd = 0;
+  if (!seekIdlePageSpan(input, pageCount, page, pageEnd)) return nullptr;
+  // The temporary HAL wrapper is already allocated. Recheck the original
+  // SD-font idle floor before allocating any Page objects.
+  const auto heap = MemoryBudget::snapshot();
+  if (heap.freeHeap < 64U * 1024U || heap.maxAllocHeap < 40U * 1024U) return nullptr;
+  return Page::deserializeForIdle(input, pageEnd);
+}
 
 std::optional<uint16_t> Section::getCachedPageCount() const {
   FsFile f;

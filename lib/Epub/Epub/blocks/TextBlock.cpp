@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "../../../ScalableFont/ScalableFontSizing.h"
+#include "../PageReadBudget.h"
 
 namespace {
 
@@ -436,7 +437,9 @@ bool validateTextBlockHeader(const uint16_t wordCount, const uint8_t hasFocus, c
   return true;
 }
 
-std::unique_ptr<uint8_t[]> deserializeTextArena(HalFile& file, const size_t size) {
+std::unique_ptr<uint8_t[]> deserializeTextArena(HalFile& file, const size_t size, PageReadBudget* budget) {
+  if (budget && !budget->allowsRead(file, size)) return nullptr;
+  if (!chargePageAllocation(budget, size)) return nullptr;
   const int remaining = file.available();
   if (remaining < 0 || static_cast<size_t>(remaining) < size) {
     LOG_ERR("TXB", "Deserialization failed: truncated arena (%u bytes needed, %d available)",
@@ -448,7 +451,7 @@ std::unique_ptr<uint8_t[]> deserializeTextArena(HalFile& file, const size_t size
     LOG_ERR("TXB", "OOM: arena %u bytes", static_cast<uint32_t>(size));
     return nullptr;
   }
-  if (file.read(arena.get(), size) != static_cast<int>(size)) {
+  if (!readPageBytes(file, budget, arena.get(), size)) {
     LOG_ERR("TXB", "Deserialization failed: arena read (%u bytes)", static_cast<uint32_t>(size));
     return nullptr;
   }
@@ -470,18 +473,21 @@ bool validateTextArena(const uint16_t* textOffsets, const char* text, const uint
   return true;
 }
 
-bool deserializeRuby(HalFile& file, const uint16_t wordCount, std::vector<std::string>& rubyTexts) {
+bool deserializeRuby(HalFile& file, const uint16_t wordCount, std::vector<std::string>& rubyTexts,
+                     PageReadBudget* budget) {
   uint16_t rubyCount = 0;
-  if (!serialization::tryReadPod(file, rubyCount) || rubyCount > wordCount) {
+  if (!readPagePodGroup(file, budget, rubyCount) || rubyCount > wordCount) {
     LOG_ERR("TXB", "Deserialization failed: invalid ruby count %u", rubyCount);
     return false;
   }
-  if (rubyCount > 0) rubyTexts.resize(wordCount);
+  if (rubyCount > 0) {
+    if (!chargePageAllocation(budget, wordCount * sizeof(std::string))) return false;
+    rubyTexts.resize(wordCount);
+  }
   for (uint16_t i = 0; i < rubyCount; ++i) {
     uint16_t wordIndex = 0;
     std::string ruby;
-    if (!serialization::tryReadPod(file, wordIndex) || wordIndex >= wordCount ||
-        !serialization::tryReadString(file, ruby)) {
+    if (!readPagePodGroup(file, budget, wordIndex) || wordIndex >= wordCount || !readPageString(file, budget, ruby)) {
       LOG_ERR("TXB", "Deserialization failed: invalid ruby annotation");
       return false;
     }
@@ -490,12 +496,11 @@ bool deserializeRuby(HalFile& file, const uint16_t wordCount, std::vector<std::s
   return true;
 }
 
-bool deserializeBlockStyle(HalFile& file, BlockStyle& style) {
-  if (!serialization::tryReadPodGroup(file, style.alignment, style.textAlignDefined, style.marginTop,
-                                      style.marginBottom, style.marginLeft, style.marginRight, style.paddingTop,
-                                      style.paddingBottom, style.paddingLeft, style.paddingRight, style.textIndent,
-                                      style.textIndentDefined, style.isRtl, style.directionDefined, style.fontSize,
-                                      style.lineHeight) ||
+bool deserializeBlockStyle(HalFile& file, BlockStyle& style, PageReadBudget* budget) {
+  if (!readPagePodGroup(file, budget, style.alignment, style.textAlignDefined, style.marginTop, style.marginBottom,
+                        style.marginLeft, style.marginRight, style.paddingTop, style.paddingBottom, style.paddingLeft,
+                        style.paddingRight, style.textIndent, style.textIndentDefined, style.isRtl,
+                        style.directionDefined, style.fontSize, style.lineHeight) ||
       (style.fontSize != 0 &&
        (style.fontSize < ScalableContentMinPointSize || style.fontSize > ScalableContentMaxPointSize))) {
     LOG_ERR("TXB", "Deserialization failed: truncated block style metadata");
@@ -506,14 +511,14 @@ bool deserializeBlockStyle(HalFile& file, BlockStyle& style) {
 
 }  // namespace
 
-std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
+std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file, PageReadBudget* budget) {
   uint16_t wc = 0;
   uint8_t hasFocus = 0;
   uint8_t hasGuideDots = 0;
   uint8_t hasWordFlags = 0;
   uint8_t hasWordSpaces = 0;
   uint16_t textBytes = 0;
-  if (!serialization::tryReadPodGroup(file, wc, hasFocus, hasGuideDots, hasWordFlags, hasWordSpaces, textBytes)) {
+  if (!readPagePodGroup(file, budget, wc, hasFocus, hasGuideDots, hasWordFlags, hasWordSpaces, textBytes)) {
     LOG_ERR("TXB", "Deserialization failed: could not read block header");
     return nullptr;
   }
@@ -521,6 +526,7 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
     return nullptr;
   }
 
+  if (!chargePageAllocation(budget, sizeof(TextBlock))) return nullptr;
   std::unique_ptr<TextBlock> block(new (std::nothrow) TextBlock());
   if (!block) {
     LOG_ERR("TXB", "Deserialization failed: could not allocate TextBlock");
@@ -536,7 +542,7 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
   if (wc > 0) {
     const size_t size = arenaSize(wc, block->focusPresent, block->guideDotsPresent, block->wordFlagsPresent,
                                   block->wordSpacesPresent, textBytes);
-    block->arena = deserializeTextArena(file, size);
+    block->arena = deserializeTextArena(file, size, budget);
     if (!block->arena) {
       return nullptr;
     }
@@ -546,7 +552,7 @@ std::unique_ptr<TextBlock> TextBlock::deserialize(HalFile& file) {
     }
   }
 
-  if (!deserializeRuby(file, wc, block->rubyTexts) || !deserializeBlockStyle(file, block->blockStyle)) {
+  if (!deserializeRuby(file, wc, block->rubyTexts, budget) || !deserializeBlockStyle(file, block->blockStyle, budget)) {
     return nullptr;
   }
   return block;

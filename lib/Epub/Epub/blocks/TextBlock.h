@@ -10,6 +10,8 @@
 #include "Block.h"
 #include "BlockStyle.h"
 
+class PageReadBudget;
+
 // Represents one rendered line. Per-word data is packed into one heap arena
 // instead of separate vectors/strings, which reduces heap fragmentation when
 // pages are loaded and discarded repeatedly on the ESP32-C3.
@@ -92,5 +94,5 @@ class TextBlock final : public Block {
   void render(const GfxRenderer& renderer, int fontId, int x, int y, bool foregroundBlack = true) const;
   BlockType getType() override { return TEXT_BLOCK; }
   bool serialize(HalFile& file) const;
-  static std::unique_ptr<TextBlock> deserialize(HalFile& file);
+  static std::unique_ptr<TextBlock> deserialize(HalFile& file, PageReadBudget* budget = nullptr);
 };

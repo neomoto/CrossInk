@@ -13,6 +13,8 @@
 #include "blocks/ImageBlock.h"
 #include "blocks/TextBlock.h"
 
+class PageReadBudget;
+
 enum PageElementTag : uint8_t {
   TAG_PageLine = 1,
   TAG_PageImage = 2,  // New tag
@@ -43,7 +45,7 @@ class PageLine final : public PageElement {
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) override;
   bool serialize(FsFile& file) override;
   PageElementTag getTag() const override { return TAG_PageLine; }
-  static std::unique_ptr<PageLine> deserialize(FsFile& file);
+  static std::unique_ptr<PageLine> deserialize(FsFile& file, PageReadBudget* budget = nullptr);
 };
 
 // New PageImage class
@@ -58,7 +60,7 @@ class PageImage final : public PageElement {
   void renderPlaceholder(GfxRenderer& renderer, int xOffset, int yOffset, bool foregroundBlack) const;
   bool serialize(FsFile& file) override;
   PageElementTag getTag() const override { return TAG_PageImage; }
-  static std::unique_ptr<PageImage> deserialize(FsFile& file);
+  static std::unique_ptr<PageImage> deserialize(FsFile& file, PageReadBudget* budget = nullptr);
   const ImageBlock& getImageBlock() const { return *imageBlock; }
   bool isInlineImage() const { return inlineImage; }
 };
@@ -74,7 +76,7 @@ class PageHorizontalRule final : public PageElement {
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) override;
   bool serialize(FsFile& file) override;
   PageElementTag getTag() const override { return TAG_PageHorizontalRule; }
-  static std::unique_ptr<PageHorizontalRule> deserialize(FsFile& file);
+  static std::unique_ptr<PageHorizontalRule> deserialize(FsFile& file, PageReadBudget* budget = nullptr);
 };
 
 struct TableFragmentCell {
@@ -84,7 +86,7 @@ struct TableFragmentCell {
   std::vector<std::shared_ptr<TextBlock>> lines;
 
   bool serialize(FsFile& file) const;
-  static bool deserialize(FsFile& file, TableFragmentCell& outCell);
+  static bool deserialize(FsFile& file, TableFragmentCell& outCell, PageReadBudget* budget = nullptr);
 };
 
 struct TableFragmentRow {
@@ -94,7 +96,7 @@ struct TableFragmentRow {
   std::vector<TableFragmentCell> cells;
 
   bool serialize(FsFile& file) const;
-  static bool deserialize(FsFile& file, TableFragmentRow& outRow);
+  static bool deserialize(FsFile& file, TableFragmentRow& outRow, PageReadBudget* budget = nullptr);
 };
 
 struct PageTextLine {
@@ -141,7 +143,7 @@ class PageTableFragment final : public PageElement {
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) override;
   bool serialize(FsFile& file) override;
   PageElementTag getTag() const override { return TAG_PageTableFragment; }
-  static std::unique_ptr<PageTableFragment> deserialize(FsFile& file);
+  static std::unique_ptr<PageTableFragment> deserialize(FsFile& file, PageReadBudget* budget = nullptr);
   uint16_t getHeight() const;
 };
 
@@ -202,7 +204,10 @@ class Page {
                                    bool foregroundBlack = true, bool renderCachedImages = true) const;
   bool forEachTextLine(PageTextLineVisitor visitor, void* context) const;
   bool serialize(FsFile& file) const;
-  static std::unique_ptr<Page> deserialize(FsFile& file);
+  static std::unique_ptr<Page> deserialize(FsFile& file, PageReadBudget* budget = nullptr);
+  // Optional idle preparation only: bound every nested allocation/read and
+  // require exact consumption of the page's LUT-delimited serialized span.
+  static std::unique_ptr<Page> deserializeForIdle(FsFile& file, size_t pageEnd);
 
   // Return the fixed-point page units protected by images on this page. Text
   // pages return zero; image-only pages are one full page (256 units), while
