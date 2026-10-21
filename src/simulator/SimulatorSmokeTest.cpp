@@ -595,6 +595,62 @@ class SimulatorSmokeTest {
       fail("Interrupted CrossInk settings save did not recover before CrossPoint import");
     }
 
+    {
+      // Keep valid JSON formatting so a redundant load-time save is observable even if values stay the same.
+      const auto writeSettingsFixture = [&](const JsonDocument& document) {
+        String json;
+        serializeJsonPretty(document, json);
+        json += '\n';
+        if (!Storage.writeFile(crossInkSettingsPath, json)) fail("Could not write device-name settings fixture");
+        return json;
+      };
+      const auto verifyStableNameLoad = [&](const char* name, const String& expectedJson) {
+        const char* effectiveName = name[0] != '\0' ? name : CrossPointSettings::getDefaultDeviceName();
+        if (!SETTINGS.loadFromFile() || std::strcmp(SETTINGS.deviceName, name) != 0 ||
+            std::strcmp(SETTINGS.getEffectiveDeviceName(), effectiveName) != 0 ||
+            Storage.readFile(crossInkSettingsPath) != expectedJson) {
+          fail("Canonical device-name settings changed or were rewritten on load: '%s'", name);
+        }
+      };
+      JsonDocument canonical;
+      canonical.set(original);
+      for (const char* name : {"", "ab", "Bedroom reader", "01234567890123456789"}) {
+        canonical["deviceName"] = name;
+        const String expectedJson = writeSettingsFixture(canonical);
+        std::snprintf(SETTINGS.deviceName, sizeof(SETTINGS.deviceName), "%s", "Previous reader");
+        verifyStableNameLoad(name, expectedJson);
+      }
+
+      canonical["deviceName"] = "x";
+      writeSettingsFixture(canonical);
+      if (!SETTINGS.loadFromFile() || SETTINGS.deviceName[0] != '\0') {
+        fail("Malformed short device name did not select the automatic name");
+      }
+      JsonDocument repaired;
+      if (deserializeJson(repaired, Storage.readFile(crossInkSettingsPath)) ||
+          !repaired["deviceName"].is<const char*>() || repaired["deviceName"].as<const char*>()[0] != '\0') {
+        fail("Malformed short device-name repair was not persisted");
+      }
+      verifyStableNameLoad("", writeSettingsFixture(repaired));
+
+      // An automatic device name must not suppress a genuine legacy-settings migration.
+      canonical["deviceName"] = "";
+      canonical.remove("previousPageGesture");
+      const uint8_t migratedGesture = canonical["pageTurnGesture"].as<uint8_t>();
+      writeSettingsFixture(canonical);
+      if (!SETTINGS.loadFromFile() || SETTINGS.deviceName[0] != '\0' ||
+          SETTINGS.previousPageGesture != migratedGesture) {
+        fail("Legacy settings migration failed with an automatic device name");
+      }
+      JsonDocument migrated;
+      if (deserializeJson(migrated, Storage.readFile(crossInkSettingsPath)) ||
+          !migrated["previousPageGesture"].is<uint8_t>() ||
+          migrated["previousPageGesture"].as<uint8_t>() != migratedGesture) {
+        fail("Legacy settings migration with an automatic device name was not persisted");
+      }
+      verifyStableNameLoad("", writeSettingsFixture(migrated));
+    }
+
     if (hadCrossInkSettings) {
       if (!Storage.writeFile(crossInkSettingsPath, savedCrossInkSettings)) fail("Could not restore CrossInk settings");
     } else if (Storage.exists(crossInkSettingsPath) && !Storage.remove(crossInkSettingsPath)) {

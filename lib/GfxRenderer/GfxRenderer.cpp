@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "BitmapRow.h"
 #include "FontCacheManager.h"
 #include "GlyphBitmap.h"
 
@@ -2110,6 +2111,34 @@ bool GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
   auto* outputRow = bitmapScratchOutputRow_;
   auto* rowBytes = bitmapScratchRowBytes_;
 
+  // Packed, unscaled rows can resolve their transform and phase once. The
+  // scalar path below retains downscale's source-order overwrite semantics.
+  const bool usePackedRows = !isScaled && cropPixX >= 0;
+  const bitmapRow::Plane packedPlane =
+      renderMode == BW ? bitmapRow::Plane::BW
+      : renderMode == GRAYSCALE_MSB
+          ? (absoluteGrayPlanes ? bitmapRow::Plane::AbsoluteMSB : bitmapRow::Plane::OverlayMSB)
+          : (absoluteGrayPlanes ? bitmapRow::Plane::AbsoluteLSB : bitmapRow::Plane::OverlayLSB);
+  glyphBitmap::Target packedTarget{getWriteTarget(), panelWidth, panelWidthBytes, getWriteOriginY(), getWriteRows(), {}};
+  int packedLeft = cropPixX;
+  int packedRight = bitmap.getWidth() - cropPixX;
+  if (usePackedRows) {
+    const int rowX = x - cropPixX;
+    if (textClipActive_) {
+      glyphBitmap::clipAxis(rowX, 1, textClipLeft_, textClipRight_, packedLeft, packedRight);
+    }
+    glyphBitmap::Frame& frame = packedTarget.frame;
+    rotateCoordinates(orientation, rowX, 0, &frame.x, &frame.y, panelWidth, panelHeight);
+    int nextX, nextY;
+    rotateCoordinates(orientation, rowX + 1, 0, &nextX, &nextY, panelWidth, panelHeight);
+    frame.dxX = nextX - frame.x;
+    frame.dxY = nextY - frame.y;
+    rotateCoordinates(orientation, rowX, 1, &nextX, &nextY, panelWidth, panelHeight);
+    frame.dyX = nextX - frame.x;
+    frame.dyY = nextY - frame.y;
+  }
+  const glyphBitmap::Frame packedBase = packedTarget.frame;
+
   for (int bmpY = 0; bmpY < (bitmap.getHeight() - cropPixY); bmpY++) {
     // The BMP's (0, 0) is the bottom-left corner (if the height is positive, top-left if negative).
     // Screen's (0, 0) is the top-left corner.
@@ -2130,6 +2159,14 @@ bool GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
 
     if (bmpY < cropPixY) {
       // Skip the row if it's outside the crop area
+      continue;
+    }
+
+    if (usePackedRows) {
+      if (textClipActive_ && (screenY < textClipTop_ || screenY >= textClipBottom_)) continue;
+      packedTarget.frame.x = packedBase.x + screenY * packedBase.dyX;
+      packedTarget.frame.y = packedBase.y + screenY * packedBase.dyY;
+      bitmapRow::draw(outputRow, bitmap.getWidth(), packedLeft, packedRight, packedPlane, packedTarget);
       continue;
     }
 

@@ -544,17 +544,22 @@ void SleepActivity::onEnter() {
   // X4 Pro and X4 Classic share a panel that can retain this high-contrast
   // transient update beneath the final OEM-style sleep refresh. Render only
   // the final sleep frame on that panel family.
-  const bool showSleepPopup = !BoardConfig::isX4Pro() && !CROSSINK_APP_DEVICE_X4CLASSIC;
-  // Show the popup in the orientation that was visible before reader exit restores
-  // global settings. Reset to portrait afterwards so sleep screen layout stays unchanged.
-  if (APP_STATE.lastSleepFromReader) {
-    if (showSleepPopup) {
-      renderer.setOrientation(sleepPopupOrientation);
-      GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
-    }
+  // X3's directly rendered dark, light, and blank screens also need only their final refresh.
+  const bool isX3 = gpio.deviceIsX3();
+  const bool x3DirectSleepScreen = isX3 && (sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::DARK ||
+                                          sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::LIGHT ||
+                                          sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::BLANK);
+  // Let the cover renderer reuse its existing cache lookup and validation before
+  // deciding whether feedback is needed for preparation or a failed-cache fallback.
+  const bool deferCoverPopup =
+      isX3 && (sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::COVER ||
+               (sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::COVER_CUSTOM && APP_STATE.lastSleepFromReader));
+  const bool showSleepPopup =
+      !BoardConfig::isX4Pro() && !CROSSINK_APP_DEVICE_X4CLASSIC && !x3DirectSleepScreen && !deferCoverPopup;
+  if (showSleepPopup) {
+    renderEnteringSleepPopup();
+  } else if (APP_STATE.lastSleepFromReader) {
     renderer.setOrientation(GfxRenderer::Orientation::Portrait);
-  } else if (showSleepPopup) {
-    GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
   }
 
   switch (sleepScreen) {
@@ -563,10 +568,10 @@ void SleepActivity::onEnter() {
     case (CrossPointSettings::SLEEP_SCREEN_MODE::CUSTOM):
       return renderCustomSleepScreen();
     case (CrossPointSettings::SLEEP_SCREEN_MODE::COVER):
-      return renderCoverSleepScreen();
+      return renderCoverSleepScreen(deferCoverPopup);
     case (CrossPointSettings::SLEEP_SCREEN_MODE::COVER_CUSTOM):
       if (APP_STATE.lastSleepFromReader) {
-        return renderCoverSleepScreen();
+        return renderCoverSleepScreen(deferCoverPopup);
       } else {
         return renderCustomSleepScreen();
       }
@@ -584,6 +589,17 @@ void SleepActivity::onEnter() {
       return renderDashboardSleepScreen();
     default:
       return renderDefaultSleepScreen();
+  }
+}
+
+void SleepActivity::renderEnteringSleepPopup() const {
+  // Use the orientation visible before reader exit, then restore the sleep layout.
+  if (APP_STATE.lastSleepFromReader) {
+    renderer.setOrientation(sleepPopupOrientation);
+  }
+  GUI.drawPopup(renderer, tr(STR_ENTERING_SLEEP));
+  if (APP_STATE.lastSleepFromReader) {
+    renderer.setOrientation(GfxRenderer::Orientation::Portrait);
   }
 }
 
@@ -812,7 +828,7 @@ bool SleepActivity::renderBitmapSleepScreen(Bitmap& bitmap) const {
   return true;
 }
 
-void SleepActivity::renderCoverSleepScreen() const {
+void SleepActivity::renderCoverSleepScreen(bool sleepPopupDeferred) const {
   void (SleepActivity::*renderNoCoverSleepScreen)() const;
   switch (SETTINGS.sleepScreen) {
     case (CrossPointSettings::SLEEP_SCREEN_MODE::COVER_CUSTOM):
@@ -825,6 +841,7 @@ void SleepActivity::renderCoverSleepScreen() const {
 
   const std::string& path = currentBookPath.empty() ? APP_STATE.openEpubPath : currentBookPath;
   if (path.empty()) {
+    if (sleepPopupDeferred) renderEnteringSleepPopup();
     return (this->*renderNoCoverSleepScreen)();
   }
 
@@ -832,8 +849,14 @@ void SleepActivity::renderCoverSleepScreen() const {
                         SETTINGS.sleepScreenCoverFilter == CrossPointSettings::SLEEP_SCREEN_COVER_FILTER::NO_FILTER;
   bool cropped = SETTINGS.sleepScreenCoverMode == CrossPointSettings::SLEEP_SCREEN_COVER_MODE::CROP;
   std::string coverBmpPath = SleepCoverAssets::cachedCoverPathFor(path, cropped, absolute);
-  if (coverBmpPath.empty() && SleepCoverAssets::prepareFullCoverForPath(path, cropped, &renderer, absolute)) {
-    coverBmpPath = SleepCoverAssets::cachedCoverPathFor(path, cropped, absolute);
+  if (coverBmpPath.empty()) {
+    if (sleepPopupDeferred) {
+      renderEnteringSleepPopup();
+      sleepPopupDeferred = false;
+    }
+    if (SleepCoverAssets::prepareFullCoverForPath(path, cropped, &renderer, absolute)) {
+      coverBmpPath = SleepCoverAssets::cachedCoverPathFor(path, cropped, absolute);
+    }
   }
   if (coverBmpPath.empty()) {
     return (this->*renderNoCoverSleepScreen)();
@@ -851,6 +874,7 @@ void SleepActivity::renderCoverSleepScreen() const {
   }
 
   file.close();
+  if (sleepPopupDeferred) renderEnteringSleepPopup();
   return (this->*renderNoCoverSleepScreen)();
 }
 

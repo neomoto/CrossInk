@@ -588,6 +588,115 @@ Host flashing did not access, format, or clear the SD card; no independent SD
 backup was taken. These checks establish installation, bounded startup health,
 and user-reported state preservation, not sustained heap or physical latency.
 
+### Sleep-entry and wake work
+
+On X3, plain Dark/Light/Blank sleep screens now reach their final refresh without
+an intermediate Entering Sleep popup. A cached cover also skips that popup when
+the existing open, header parse, and decode succeed. Missing covers still show
+feedback before preparation. Unreadable or malformed covers still show feedback
+before the existing default/custom fallback. Other devices retain their popup
+policy.
+
+The cover path reuses its existing lookup, file handle, and row scratch storage.
+Native two-bit BMP rows with unchanged geometry and no active ditherer normalize
+their four palette entries once per row. Already-normalized pixels use a packed
+copy; other native palette orders use a 16-byte two-pixel lookup. Tail bits are
+cleared, BMP padding is excluded, and read/error/counter/rewind behavior is retained.
+
+Eligible unscaled bitmap rows resolve plane, orientation, and clipping outside
+the pixel loop. Packed writes preserve monochrome transparency, overlay and
+absolute grayscale, all four rotations, physical strip bounds, and untouched
+destination bits. Existing algorithms remain for inputs outside these guards.
+These paths add no heap allocation, full framebuffer, or persistent image cache.
+Refresh waveforms, final pixels, reader-exit saves, storage shutdown, and board
+power sequencing are unchanged.
+
+Wake settings loading now treats an already-empty automatic device name as
+canonical. Invalid nonempty short names still require repair and persistence.
+The existing settings smoke checks canonical empty/valid names, persisted repair,
+stable reload, and genuine legacy migration.
+
+#### Local evidence
+
+Normal application runs exercise 17 paired sleep/wake cases: direct screens,
+valid, missing, invalid-header and truncated covers, landscape, cover/custom
+from Home, Quick Resume in night mode, TXT byte-anchor preservation, and four
+packed-image fixtures covering odd widths, top-down/bottom-up rows, permuted
+palettes, panel-width rows, and downscaling. All 34 complete before/wake SDL
+surface pairs and 17 sleep B/W backing buffers match the baseline. Source books
+and retained settings/progress/bookmarks match.
+
+The B/W buffer is not proof of both grayscale planes; native rendering also does
+not exercise the physical controller's Absolute/Direct grayscale paths. Independent
+scalar byte oracles cover all five plane modes, rotations, alignments, cropped
+prefixes, clipping, strips, packed tails, padding, and exact allocation boundaries.
+
+Use an isolated working directory containing its own `fs_`, and set
+`CROSSPOINT_SIM_SD` to that same absolute directory. Some existing full-smoke
+checks use literal `fs_` paths with `std::filesystem`; the environment override
+alone does not isolate them. Never launch that smoke against a checkout's real
+card directory. Reader fixtures explicitly set a healthy resume counter and
+assign short Power to Sleep before replay.
+
+File Activity follows two startup passes in one normal public cover lifecycle:
+
+| Native filesystem attribution | Baseline | Candidate |
+| --- | ---: | ---: |
+| Settings-save calls during setup | 20 | 0 |
+| All card filesystem calls in the lifecycle | 4,812 | 4,772 |
+
+These counts show removal of one settings rewrite per startup, not a measured
+physical wake-latency gain. The normal application smoke passes, including the
+settings persistence regressions, and all 1,171 ASan/UBSan-enabled CTest entries
+pass. Independent safety reviews found no outstanding defect; static review
+does not establish universal hardware safety.
+
+The clean production simulator and ESP32-C3 build pass after removing the
+temporary timing/drain/raw-capture scaffolding. A fresh uninstrumented Power
+sleep/reader-resume run retains both visible surfaces and primary state.
+The production image is 6,351,920 bytes, with 201,680 bytes of repository OTA
+headroom and unchanged 64,832-byte static RAM use. Offline checksum and image
+validation pass. Its SHA-256 is
+`a6fa064951010a7d9009f909eef9617a95c02bacb535db47a3f4c011b6b86372`.
+It is installed in app1 and confirmed sequence 24, VALID, with exact app readback
+and protected-region verification before boot. Original app0 and its E000
+selector remain intact. With serial closed, the user confirmed the normal
+cover, saved passage, and controls through a production sleep/wake cycle.
+Static RAM is not a measurement of peak dynamic memory.
+
+#### Physical X3 measurement
+
+After the user authorized resumption, complete host-received lifecycle traces
+were collected on the same cached native two-bit 515×792 cover, with COVER,
+NO_FILTER, FIT, and a settled reader page. Earlier missing/incomplete traces
+remain excluded.
+
+| Physical configuration | Preparation (s) | Decode/draw (s) | Activation lap (s) |
+| --- | ---: | ---: | ---: |
+| Baseline `16da21ec`, lifecycle timing | 3.348728 | — | — |
+| Popup/settings optimization, lifecycle timing | 2.876382 | — | — |
+| Same first optimization, detailed profiling | 2.881112 | 1.840145 | 0.820760 |
+| Packed-row optimization, detailed profiling | 1.211026 | 0.230481 | 0.819715 |
+
+Preparation is 2.765× faster than the baseline, or 63.84% shorter, for this
+cover. Each configuration has one accepted sample; this is not a guarantee
+for every book or image. Decode/draw includes file reads. Activation laps include
+the enclosed BUSY diagnostics; both detailed runs observed qualified refresh
+and power-off completion with no BUSY timeout.
+
+The boundary is `enterDeepSleep()` entry through safe application power-manager
+handoff, before diagnostic delivery. It is not a physical button edge,
+electrical-off time, or wake-latency measurement. Diagnostic logging contributes
+to enclosing timings; the bounded post-timestamp completion drain is excluded.
+All temporary lifecycle, cover, BUSY, drain, and raw-capture probes were removed
+from the installed normal image. Controller waveforms, wait thresholds, image
+quality, progress durability, and power sequencing were not shortened or skipped.
+
+Local public-fixture evidence is retained under `crossink-sleep-wake-he1s9ao5`
+in the macOS temporary directory. Physical logs, frozen diagnostic images, and
+recovery receipts remain in the private device-backup directory; no private
+book data is included in the repository.
+
 
 ## Flash and monitor
 
