@@ -10,6 +10,9 @@
 - Build all four firmware targets and run native regression checks in GitHub
   Actions on pushes to `main`/`develop` and pull requests, with downloadable
   firmware artifacts.
+- Publish versioned firmware releases from successful `v*` tag CI runs. Reuse
+  checked artifacts without rebuilding. Branch and pull-request builds do not
+  publish releases.
 
 ### Changed
 

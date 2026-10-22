@@ -3,6 +3,7 @@ name: CI (build)
 on:
   push:
     branches: [main, develop]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -15,6 +16,40 @@ permissions:
   contents: read
 
 jobs:
+  release-metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      artifact_suffix: ${{ steps.release.outputs.artifact_suffix }}
+    steps:
+      - uses: actions/checkout@v6
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        with:
+          fetch-depth: 0
+
+      - name: Prepare release metadata
+        id: release
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != push || "$GITHUB_REF" != refs/tags/v* ]]; then
+            printf 'version=\nartifact_suffix=\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+)+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ ]]; then
+            echo "::error::Invalid release tag: use v followed by a numeric-dot version and optional alphanumeric prerelease segments separated by single dots or dashes."
+            exit 1
+          fi
+
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::Release tags must point to a commit on origin/main."
+            exit 1
+          fi
+
+          printf 'version=%s\nartifact_suffix=-v%s\n' "$version" "$version" >> "$GITHUB_OUTPUT"
+
   clang-format:
     runs-on: ubuntu-latest
     steps:
@@ -85,6 +120,9 @@ jobs:
         run: pio check --fail-on-defect low --fail-on-defect medium --fail-on-defect high
 
   build:
+    needs: release-metadata
+    env:
+      CROSSINK_RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -155,7 +193,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ci-firmware-${{ matrix.environment }}
-          path: .pio/build/${{ matrix.environment }}/${{ matrix.firmware }}.bin
+          path: .pio/build/${{ matrix.environment }}/${{ matrix.firmware }}${{ needs.release-metadata.outputs.artifact_suffix }}.bin
           if-no-files-found: error
 
   native-tests:
@@ -201,3 +239,42 @@ jobs:
         run: exit 1
       - name: Success
         run: exit 0
+
+  publish-release:
+    needs:
+      - release-metadata
+      - build
+      - clang-format
+      - cppcheck
+      - native-tests
+      - test-status
+    if: >-
+      ${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+          needs.release-metadata.result == 'success' && needs.build.result == 'success' &&
+          needs.clang-format.result == 'success' && needs.cppcheck.result == 'success' &&
+          needs.native-tests.result == 'success' && needs.test-status.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download firmware artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: ci-firmware-*
+          path: release-firmware
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ contains(needs.release-metadata.outputs.version, '-') }}
+          files: |
+            release-firmware/firmware-x3-x4-v${{ needs.release-metadata.outputs.version }}.bin
+            release-firmware/firmware-sticky-v${{ needs.release-metadata.outputs.version }}.bin
+            release-firmware/firmware-x4-pro-v${{ needs.release-metadata.outputs.version }}.bin
+            release-firmware/firmware-x4-classic-v${{ needs.release-metadata.outputs.version }}.bin

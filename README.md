@@ -203,7 +203,13 @@ The Xteink X3 runs on an ESP32-C3 with limited RAM, so very large folders or com
 
 ## Installation
 
-To run these optimizations and auto-rotation features, build and flash from source on this repository's [`perf/x3-reader` branch](https://github.com/neomoto/CrossInk/tree/perf/x3-reader) using the [build instructions](./docs/development/getting-started.md).
+After a version tag passes CI, download the matching firmware from [this fork's releases](https://github.com/neomoto/CrossInk/releases).
+
+Development binaries are available from the [CI workflow](https://github.com/neomoto/CrossInk/actions/workflows/ci.yml). These builds are not releases.
+
+To build from source, use this repository's [`main` branch](https://github.com/neomoto/CrossInk/tree/main) and the [build instructions](./docs/development/getting-started.md).
+
+See [Versioned releases](./docs/development/testing-debugging.md#versioned-releases) for release tags and required CI checks.
 
 > **Note:** Pre-built binaries from [upstream CrossInk releases](https://github.com/uxjulia/CrossInk/releases) and the [Inky web installer](https://inky.crossink.dev/#flash-tools) deliver official upstream firmware, not this fork's changes. See the [installation guide](./docs/installation.md) for standard flashing and revert workflows.
 

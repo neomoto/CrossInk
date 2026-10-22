@@ -25,9 +25,9 @@ pio run -e default
 ## GitHub Actions CI
 
 The [CI workflow](../../.github/workflows/ci.yml) runs on pushes to `main` and
-`develop`, on pull requests, and through the **Run workflow** button in GitHub
-Actions. It checks formatting, runs cppcheck and the native CMake/CTest suite,
-and compiles each firmware target:
+`develop`, `v*` tag pushes, pull requests, and manual **Run workflow** requests.
+It checks formatting, runs cppcheck and the native CMake/CTest suite, and compiles
+each firmware target:
 
 | PlatformIO environment | Downloadable artifact | Firmware file |
 | --- | --- | --- |
@@ -36,9 +36,13 @@ and compiles each firmware target:
 | `x4-pro` | `ci-firmware-x4-pro` | `firmware-x4-pro.bin` |
 | `x4-classic` | `ci-firmware-x4-classic` | `firmware-x4-classic.bin` |
 
-Download artifacts from the completed workflow run. These builds do not create a
-release or flash a device; use the separate release workflow for release builds.
-The workflow uses read-only repository permissions and needs no deployment secrets.
+Download artifacts from the completed workflow run. Branch, pull-request, and
+manual CI runs do not create releases or flash devices. Version-tag pushes can
+publish releases after all checks pass.
+
+Build and check jobs use read-only repository permissions. Only the tag publisher
+receives `contents: write` through the automatic GitHub token. No PAT or signing
+secret is required.
 The separate Pages workflow deploys only from upstream `uxjulia/CrossInk`, not
 from forks.
 
@@ -48,6 +52,32 @@ SDK checkout cannot build on GitHub. Keep the committed SDK revision rather than
 substituting a newer branch tip.
 
 To run the native suite locally, use the commands in [test/README](../../test/README).
+
+### Versioned releases
+
+Tag a commit that already exists on the repository's `main` branch:
+
+```sh
+git tag v1.6.2 main
+git push https://github.com/neomoto/CrossInk.git v1.6.2
+```
+
+Replace `1.6.2` with the release version.
+
+Tags use numeric components separated by dots. An optional suffix such as `-rc.1`
+creates a prerelease. The metadata job
+rejects tags that require version or filename normalization.
+
+Publishing requires successful firmware builds, formatting, cppcheck, native
+tests, release metadata, and the aggregate check. A skipped, failed, or canceled
+check blocks publishing. Branch pushes and pull requests never publish releases.
+Manual CI runs against branch or tag refs also do not publish.
+
+Tag builds set `CROSSINK_RELEASE_VERSION`, so the embedded base version matches
+the tag version. The four release assets use `firmware-<device>-v<version>.bin`
+names. The publisher downloads the same run's artifacts and creates a GitHub
+Release with generated notes. It does not rebuild firmware, update Pages
+catalogs, or change the firmware's OTA repository.
 
 ## Native performance profiling
 
