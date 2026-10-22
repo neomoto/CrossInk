@@ -2,10 +2,11 @@ name: CI (build)
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
   pull_request:
+  workflow_dispatch:
 
-# A newer commit supersedes older PR validation; keep main pushes independent.
+# A newer commit supersedes older PR validation; keep branch pushes independent.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -68,18 +69,35 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
+      - name: Pin pioarduino core inside the platform penv
+        run: |
+          set -euo pipefail
+          # pio check generates build metadata via pio run, which can invoke
+          # custom_sdkconfig's nested pio run from ~/.platformio/penv.
+          # See https://github.com/pioarduino/platform-espressif32/issues/529
+          for environment in default sticky x4-pro x4-classic; do
+            pio pkg install -e "$environment"
+          done
+          uv pip install --python ~/.platformio/penv/bin/python "pioarduino==6.1.19"
+          ~/.platformio/penv/bin/pio --version
+
       - name: Run cppcheck
         run: pio check --fail-on-defect low --fail-on-defect medium --fail-on-defect high
 
   build:
-    # Firmware artifacts are validated on pull requests; release builds stay
-    # in the dedicated release workflow.
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        environment: [default, x4-pro]
+        include:
+          - environment: default
+            firmware: firmware-x3-x4
+          - environment: sticky
+            firmware: firmware-sticky
+          - environment: x4-pro
+            firmware: firmware-x4-pro
+          - environment: x4-classic
+            firmware: firmware-x4-classic
     steps:
       - uses: actions/checkout@v6
         with:
@@ -108,6 +126,18 @@ jobs:
       - name: Install PlatformIO Core
         run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
+      - name: Pin pioarduino core inside the platform penv
+        env:
+          PIO_ENV: ${{ matrix.environment }}
+        run: |
+          set -euo pipefail
+          # custom_sdkconfig runs a nested `pio run` from ~/.platformio/penv.
+          # Keep that core on the same version as the outer core.
+          # See https://github.com/pioarduino/platform-espressif32/issues/529
+          pio pkg install -e "$PIO_ENV"
+          uv pip install --python ~/.platformio/penv/bin/python "pioarduino==6.1.19"
+          ~/.platformio/penv/bin/pio --version
+
       - name: Build ${{ matrix.environment }} firmware
         run: |
           set -euo pipefail
@@ -121,6 +151,38 @@ jobs:
             grep -E "RAM:\s|Flash:\s" pio-${{ matrix.environment }}.log | while read -r line; do echo "- ${line}"; done
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-firmware-${{ matrix.environment }}
+          path: .pio/build/${{ matrix.environment }}/${{ matrix.firmware }}.bin
+          if-no-files-found: error
+
+  native-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Install native test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libexpat1-dev zlib1g-dev
+
+      - name: Configure native tests
+        run: cmake -S test -B build/native-tests
+
+      - name: Build native tests
+        run: cmake --build build/native-tests -j2
+
+      - name: Run native tests
+        run: ctest --test-dir build/native-tests --output-on-failure
+
   # This job is used as the PR required actions check, allows for changes to other steps in the future without breaking
   # PR requirements.
   test-status:
@@ -129,6 +191,7 @@ jobs:
       - build
       - clang-format
       - cppcheck
+      - native-tests
     if: always()
     runs-on: ubuntu-latest
     steps:

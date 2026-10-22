@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   deploy:
+    if: github.repository == 'uxjulia/CrossInk'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

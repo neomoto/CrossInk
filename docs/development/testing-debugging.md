@@ -20,7 +20,34 @@ pio run -e simulator
 pio run -e default
 ```
 
-`pio run` without `-e` builds the X3/X4 and Sticky firmware targets from `platformio.ini`. Use it for a comprehensive build check, but prefer explicit environments while iterating.
+`pio run` without `-e` builds all four firmware targets from `platformio.ini`: X3/X4, Sticky, X4 Pro, and X4 Classic. Prefer explicit environments while iterating.
+
+## GitHub Actions CI
+
+The [CI workflow](../../.github/workflows/ci.yml) runs on pushes to `main` and
+`develop`, on pull requests, and through the **Run workflow** button in GitHub
+Actions. It checks formatting, runs cppcheck and the native CMake/CTest suite,
+and compiles each firmware target:
+
+| PlatformIO environment | Downloadable artifact | Firmware file |
+| --- | --- | --- |
+| `default` | `ci-firmware-default` | `firmware-x3-x4.bin` |
+| `sticky` | `ci-firmware-sticky` | `firmware-sticky.bin` |
+| `x4-pro` | `ci-firmware-x4-pro` | `firmware-x4-pro.bin` |
+| `x4-classic` | `ci-firmware-x4-classic` | `firmware-x4-classic.bin` |
+
+Download artifacts from the completed workflow run. These builds do not create a
+release or flash a device; use the separate release workflow for release builds.
+The workflow uses read-only repository permissions and needs no deployment secrets.
+The separate Pages workflow deploys only from upstream `uxjulia/CrossInk`, not
+from forks.
+
+Checkout includes recursive submodules. Every pinned SDK commit must be publicly
+fetchable from its configured `.gitmodules` URL; a commit available only in a local
+SDK checkout cannot build on GitHub. Keep the committed SDK revision rather than
+substituting a newer branch tip.
+
+To run the native suite locally, use the commands in [test/README](../../test/README).
 
 ## Native performance profiling
 

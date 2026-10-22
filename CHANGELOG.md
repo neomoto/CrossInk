@@ -7,6 +7,9 @@
 - Assign Rotate Page CW to the Power button's long-press action.
 - Add opt-in, rate-limited rotation diagnostics with raw gravity, decision reasons,
   applied renderer orientation, and numeric reading anchors.
+- Build all four firmware targets and run native regression checks in GitHub
+  Actions on pushes to `main`/`develop` and pull requests, with downloadable
+  firmware artifacts.
 
 ### Changed
 

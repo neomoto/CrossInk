@@ -4,7 +4,7 @@ This is of [CrossInk](https://github.com/uxjulia/CrossInk), which itself builds 
 
 ## What’s Different in This Fork
 ### Natural, Sensor-Calibrated Auto-Rotation
-Reading in bed or switching hands was awkward without rotating the screen, but existing auto-rotation was too twitchy—flipping upside down when laid flat on a desk, and rotating backwards because the X3's accelerometer is physically mounted 180° inverted compared to other boards.
+Reading in bed or switching hands was awkward without rotating the screen.
 
 We added an orientation filter that waits for ~0.5 seconds of a stable, unambiguous hold before rotating, explicitly ignoring flat desk rests, diagonal angles, and mid-transition tilts. The axes are re-mapped specifically for the X3's hardware mounting, and long-pressing the Power button now rotates 90° clockwise on demand (cleanly suppressing the short-press sleep action upon release). The result is reliable 4-way rotation for EPUB and TXT books that only turns when you intend it to, never wobbles on a table, and includes an instant one-handed physical button shortcut.
 
