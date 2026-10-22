@@ -15,9 +15,9 @@ namespace {
 constexpr int PANEL_WIDTH = 43;
 constexpr int PANEL_HEIGHT = 39;
 constexpr int STRIDE = (PANEL_WIDTH + 7) / 8;
-constexpr std::array<bitmapRow::Plane, 5> PLANES = {
-    bitmapRow::Plane::BW, bitmapRow::Plane::OverlayLSB, bitmapRow::Plane::OverlayMSB,
-    bitmapRow::Plane::AbsoluteLSB, bitmapRow::Plane::AbsoluteMSB};
+constexpr std::array<bitmapRow::Plane, 5> PLANES = {bitmapRow::Plane::BW, bitmapRow::Plane::OverlayLSB,
+                                                    bitmapRow::Plane::OverlayMSB, bitmapRow::Plane::AbsoluteLSB,
+                                                    bitmapRow::Plane::AbsoluteMSB};
 
 struct Rect {
   int left;
@@ -67,8 +67,8 @@ glyphBitmap::Frame frameFor(int orientation, int x, int y) {
 
 // Intentionally scalar and independent of the rasterizer's bit-compaction
 // formulas, masks, clipping helpers and framebuffer-address walking.
-void paintReference(const uint8_t* row, int width, int left, int right, bitmapRow::Plane plane, int orientation,
-                    int x, int y, int originY, int rows, int guard, std::vector<uint8_t>& expected) {
+void paintReference(const uint8_t* row, int width, int left, int right, bitmapRow::Plane plane, int orientation, int x,
+                    int y, int originY, int rows, int guard, std::vector<uint8_t>& expected) {
   for (int source = 0; source < width; ++source) {
     if (source < left || source >= right) continue;
     const auto [px, py] = physical(orientation, x + source, y);
@@ -119,8 +119,8 @@ std::vector<uint8_t> packedRow(int width, uint8_t seed, int padding = 0) {
 void compareRow(const std::vector<uint8_t>& row, int width, int left, int right, bitmapRow::Plane plane,
                 int orientation, int x, int y, int originY = 0, int rows = PANEL_HEIGHT, int guard = 8) {
   SCOPED_TRACE(::testing::Message() << "plane=" << static_cast<int>(plane) << " orientation=" << orientation
-                                  << " width=" << width << " source=" << left << ',' << right << " at=" << x << ','
-                                  << y << " band=" << originY << ',' << rows << " guard=" << guard);
+                                    << " width=" << width << " source=" << left << ',' << right << " at=" << x << ','
+                                    << y << " band=" << originY << ',' << rows << " guard=" << guard);
   auto expected = background(rows, guard);
   auto actual = expected;
   paintReference(row.data(), width, left, right, plane, orientation, x, y, originY, rows, guard, expected);
@@ -131,7 +131,7 @@ void compareRow(const std::vector<uint8_t>& row, int width, int left, int right,
   const auto destination = std::make_unique<uint8_t[]>(actual.size());
   std::copy(row.begin(), row.end(), source.get());
   std::copy(actual.begin(), actual.end(), destination.get());
-  const glyphBitmap::Target target{destination.get() + guard, PANEL_WIDTH, STRIDE, originY, rows,
+  const glyphBitmap::Target target{destination.get() + guard,  PANEL_WIDTH, STRIDE, originY, rows,
                                    frameFor(orientation, x, y)};
   bitmapRow::draw(source.get(), width, left, right, plane, target);
   std::copy_n(destination.get(), actual.size(), actual.begin());
@@ -169,8 +169,8 @@ TEST(BitmapRow, CroppedPrefixesOddTailsAndSourcePadding) {
           for (int alignment = 0; alignment < 8; ++alignment) {
             const uint8_t seed = static_cast<uint8_t>(width * 17 + prefix * 29 + alignment);
             comparePhysical(packedRow(width, seed), width, prefix, width, plane, orientation, 16 + alignment, 20);
-            comparePhysical(packedRow(width + 3, seed, 4), width + 3, prefix, width, plane, orientation,
-                            16 + alignment, 20);
+            comparePhysical(packedRow(width + 3, seed, 4), width + 3, prefix, width, plane, orientation, 16 + alignment,
+                            20);
           }
         }
       }
@@ -179,18 +179,17 @@ TEST(BitmapRow, CroppedPrefixesOddTailsAndSourcePadding) {
 }
 
 TEST(BitmapRow, NegativeOffsetsPanelClippingAndPhysicalStripBands) {
-  constexpr std::array<std::pair<int, int>, 5> BANDS = {
-      std::pair{0, PANEL_HEIGHT}, std::pair{0, 1}, std::pair{7, 1}, std::pair{8, 4},
-      std::pair{PANEL_HEIGHT - 2, 2}};
+  constexpr std::array<std::pair<int, int>, 5> BANDS = {std::pair{0, PANEL_HEIGHT}, std::pair{0, 1}, std::pair{7, 1},
+                                                        std::pair{8, 4}, std::pair{PANEL_HEIGHT - 2, 2}};
   for (const auto plane : PLANES) {
     for (int orientation = 0; orientation < 4; ++orientation) {
       const int screenWidth = orientation % 2 == 0 ? PANEL_HEIGHT : PANEL_WIDTH;
       const int screenHeight = orientation % 2 == 0 ? PANEL_WIDTH : PANEL_HEIGHT;
       for (int width : {1, 2, 3, 7, 8, 9, 17, 41, 53}) {
         const auto row = packedRow(width, static_cast<uint8_t>(width * 11));
-        for (const auto [x, y] : {std::pair{-9, 0}, std::pair{-3, 7}, std::pair{3, -1}, std::pair{4, 9},
-                                  std::pair{screenWidth - 3, screenHeight - 1}, std::pair{screenWidth, 4},
-                                  std::pair{1, screenHeight}}) {
+        for (const auto [x, y] :
+             {std::pair{-9, 0}, std::pair{-3, 7}, std::pair{3, -1}, std::pair{4, 9},
+              std::pair{screenWidth - 3, screenHeight - 1}, std::pair{screenWidth, 4}, std::pair{1, screenHeight}}) {
           for (const auto [origin, rows] : BANDS) {
             for (const auto [left, right] : {std::pair{0, width}, std::pair{1, width - 1}, std::pair{3, width - 2},
                                              std::pair{-2, width + 3}, std::pair{5, 2}}) {
@@ -221,7 +220,8 @@ TEST(BitmapRow, ExactBufferEdgesPreserveLastBytePadding) {
             const int origin = verticalStep != 0 ? top : py;
             const int rows = verticalStep != 0 ? kept : 1;
             for (uint8_t seed : {0x00, 0x1b, 0x55, 0xaa, 0xe4, 0xff}) {
-              comparePhysical(packedRow(width, seed), width, prefix, width, plane, orientation, px, py, origin, rows, 0);
+              comparePhysical(packedRow(width, seed), width, prefix, width, plane, orientation, px, py, origin, rows,
+                              0);
             }
           }
         }
@@ -255,8 +255,8 @@ TEST(BitmapRow, SequentialBytePaddedRowsWithLogicalClipMatchScalarImage) {
           const int right = std::min(WIDTH - CROP_X, CLIP.right - rowX);
           const uint8_t* row = image.data() + bmpY * ROW_BYTES;
           paintReference(row, WIDTH, left, right, plane, orientation, rowX, screenY, 0, PANEL_HEIGHT, 0, expected);
-          const glyphBitmap::Target target{actual.data(), PANEL_WIDTH, STRIDE, 0, PANEL_HEIGHT,
-                                           frameFor(orientation, rowX, screenY)};
+          const glyphBitmap::Target target{
+              actual.data(), PANEL_WIDTH, STRIDE, 0, PANEL_HEIGHT, frameFor(orientation, rowX, screenY)};
           bitmapRow::draw(row, WIDTH, left, right, plane, target);
         }
         EXPECT_EQ(expected, actual) << "plane=" << static_cast<int>(plane) << " orientation=" << orientation

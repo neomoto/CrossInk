@@ -33,15 +33,14 @@ __attribute__((always_inline)) inline uint8_t pixelMask(uint8_t packed) {
   return static_cast<uint8_t>(((bits | (bits >> 2)) & 0x0f) << 4);
 }
 
-__attribute__((always_inline)) inline void replaceMaskedByte(uint8_t* buffer, int index, uint8_t mask,
-                                                              uint8_t bits) {
+__attribute__((always_inline)) inline void replaceMaskedByte(uint8_t* buffer, int index, uint8_t mask, uint8_t bits) {
   if (mask == 0) return;
   buffer[index] = static_cast<uint8_t>((buffer[index] & ~mask) | (bits & mask));
 }
 
 template <Plane plane, int Step>
 __attribute__((always_inline)) inline void paintHorizontal(uint8_t* buffer, int destination, uint8_t bits,
-                                                            int columns) {
+                                                           int columns) {
   if constexpr (Step < 0) {
     bits = static_cast<uint8_t>(glyphBitmap::reverseOneBitByte(bits) << (8 - columns));
     destination -= columns - 1;
@@ -51,10 +50,8 @@ __attribute__((always_inline)) inline void paintHorizontal(uint8_t* buffer, int 
     const uint8_t coverage = static_cast<uint8_t>(0xffu << (8 - columns));
     const uint16_t mask = static_cast<uint16_t>(coverage) << shift;
     const uint16_t positioned = static_cast<uint16_t>(bits) << shift;
-    replaceMaskedByte(buffer, destination >> 3, static_cast<uint8_t>(mask >> 8),
-                      static_cast<uint8_t>(positioned >> 8));
-    replaceMaskedByte(buffer, (destination >> 3) + 1, static_cast<uint8_t>(mask),
-                      static_cast<uint8_t>(positioned));
+    replaceMaskedByte(buffer, destination >> 3, static_cast<uint8_t>(mask >> 8), static_cast<uint8_t>(positioned >> 8));
+    replaceMaskedByte(buffer, (destination >> 3) + 1, static_cast<uint8_t>(mask), static_cast<uint8_t>(positioned));
   } else {
     bits &= static_cast<uint8_t>(0xffu << (8 - columns));
     glyphBitmap::paintHorizontalMask(buffer, destination, bits, plane == Plane::BW);
@@ -88,13 +85,13 @@ inline void drawHorizontal(const uint8_t* row, int source, int destination, int 
 }
 
 __attribute__((always_inline)) inline void replaceVerticalPixel(uint8_t* buffer, int index, uint8_t mask,
-                                                                 uint8_t bits) {
+                                                                uint8_t bits) {
   buffer[index] = static_cast<uint8_t>((buffer[index] & ~mask) | ((bits & 0x80u) != 0 ? mask : 0));
 }
 
 template <Plane plane>
-__attribute__((always_inline)) inline void paintVerticalEdge(uint8_t* buffer, int index, int stepBytes,
-                                                              uint8_t mask, uint8_t bits, int columns) {
+__attribute__((always_inline)) inline void paintVerticalEdge(uint8_t* buffer, int index, int stepBytes, uint8_t mask,
+                                                             uint8_t bits, int columns) {
   if constexpr (ABSOLUTE<plane>) {
     for (int column = 0; column < columns; ++column, index += stepBytes, bits = static_cast<uint8_t>(bits << 1)) {
       replaceVerticalPixel(buffer, index, mask, bits);

@@ -298,8 +298,8 @@ TEST(BitmapResample, Native2BitMapsEveryPackedValueThroughPaletteWithoutDitherin
     expected.push_back(0xA7);
     for (bool dithering : {false, true}) {
       for (bool imageLevels : {false, true}) {
-        SCOPED_TRACE(::testing::Message() << "palette=" << paletteCase << " dithering=" << dithering
-                                          << " imageLevels=" << imageLevels);
+        SCOPED_TRACE(::testing::Message()
+                     << "palette=" << paletteCase << " dithering=" << dithering << " imageLevels=" << imageLevels);
         HalFile file(create2BitBmp(1024, testCase.palette, {packed}));
         Bitmap bitmap(file, dithering, imageLevels);
         ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
@@ -335,10 +335,10 @@ TEST(BitmapResample, Native2BitClearsEveryTailWithoutCopyingBmpPadding) {
   for (const auto& testCase : cases) {
     for (bool remap : {false, true}) {
       for (bool defaultColorsUsed : {false, true}) {
-        SCOPED_TRACE(::testing::Message() << "width=" << testCase.width << " remap=" << remap
-                                          << " defaultColorsUsed=" << defaultColorsUsed);
-        const std::vector<uint8_t> palette = remap ? std::vector<uint8_t>{255, 0, 170, 85}
-                                                  : std::vector<uint8_t>{0, 85, 170, 255};
+        SCOPED_TRACE(::testing::Message()
+                     << "width=" << testCase.width << " remap=" << remap << " defaultColorsUsed=" << defaultColorsUsed);
+        const std::vector<uint8_t> palette =
+            remap ? std::vector<uint8_t>{255, 0, 170, 85} : std::vector<uint8_t>{0, 85, 170, 255};
         HalFile file(create2BitBmp(testCase.width, palette, {testCase.packed}, false, defaultColorsUsed));
         Bitmap bitmap(file, true, true);
         ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
@@ -394,10 +394,10 @@ TEST(BitmapResample, Native2BitRejectsShortRowsBeforeChangingOutput) {
   for (bool remap : {false, true}) {
     for (int completeRows : {0, 1}) {
       for (int partialBytes = 0; partialBytes < 4; partialBytes++) {
-        SCOPED_TRACE(::testing::Message() << "remap=" << remap << " completeRows=" << completeRows
-                                          << " partialBytes=" << partialBytes);
-        const std::vector<uint8_t> palette = remap ? std::vector<uint8_t>{255, 0, 170, 85}
-                                                  : std::vector<uint8_t>{0, 85, 170, 255};
+        SCOPED_TRACE(::testing::Message()
+                     << "remap=" << remap << " completeRows=" << completeRows << " partialBytes=" << partialBytes);
+        const std::vector<uint8_t> palette =
+            remap ? std::vector<uint8_t>{255, 0, 170, 85} : std::vector<uint8_t>{0, 85, 170, 255};
         const std::vector<std::vector<uint8_t>> packed =
             completeRows ? std::vector<std::vector<uint8_t>>{{0x1B, 0xBF}, {0xE4, 0x7F}}
                          : std::vector<std::vector<uint8_t>>{{0xE4, 0x7F}};
@@ -434,7 +434,7 @@ TEST(BitmapResample, Native2BitCanNormalizeInExistingRowStorage) {
     ASSERT_EQ(bitmap.parseHeaders(), BmpReaderError::Ok);
     std::vector<uint8_t> row(bitmap.getRowBytes(), 0);
     ASSERT_EQ(bitmap.readNextRow(row.data(), row.data()), BmpReaderError::Ok);
-    EXPECT_EQ(row, (remap ? std::vector<uint8_t>{0xC9, 0x94, 0xA5, 0xA5}
-                          : std::vector<uint8_t>{0x1B, 0xBC, 0xA5, 0xA5}));
+    EXPECT_EQ(row,
+              (remap ? std::vector<uint8_t>{0xC9, 0x94, 0xA5, 0xA5} : std::vector<uint8_t>{0x1B, 0xBC, 0xA5, 0xA5}));
   }
 }

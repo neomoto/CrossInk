@@ -2119,7 +2119,8 @@ bool GfxRenderer::drawBitmap(const Bitmap& bitmap, const int x, const int y, con
       : renderMode == GRAYSCALE_MSB
           ? (absoluteGrayPlanes ? bitmapRow::Plane::AbsoluteMSB : bitmapRow::Plane::OverlayMSB)
           : (absoluteGrayPlanes ? bitmapRow::Plane::AbsoluteLSB : bitmapRow::Plane::OverlayLSB);
-  glyphBitmap::Target packedTarget{getWriteTarget(), panelWidth, panelWidthBytes, getWriteOriginY(), getWriteRows(), {}};
+  glyphBitmap::Target packedTarget{getWriteTarget(),  panelWidth,     panelWidthBytes,
+                                   getWriteOriginY(), getWriteRows(), {}};
   int packedLeft = cropPixX;
   int packedRight = bitmap.getWidth() - cropPixX;
   if (usePackedRows) {

@@ -547,8 +547,8 @@ void SleepActivity::onEnter() {
   // X3's directly rendered dark, light, and blank screens also need only their final refresh.
   const bool isX3 = gpio.deviceIsX3();
   const bool x3DirectSleepScreen = isX3 && (sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::DARK ||
-                                          sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::LIGHT ||
-                                          sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::BLANK);
+                                            sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::LIGHT ||
+                                            sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::BLANK);
   // Let the cover renderer reuse its existing cache lookup and validation before
   // deciding whether feedback is needed for preparation or a failed-cache fallback.
   const bool deferCoverPopup =
