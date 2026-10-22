@@ -377,40 +377,28 @@ const std::vector<SettingInfo>& getBaseSettingsList() {
     // on next WiFi connect, which is useful when crossing time zones.
     add(SettingInfo::Toggle(StrId::STR_CLOCK_SYNCED, &CrossPointSettings::clockHasBeenSynced, "clockHasBeenSynced",
                             StrId::STR_CAT_SYSTEM));
-    // A failed IMU probe must not discard the persisted auto-rotation preference.
+    // A failed IMU probe must not discard persisted sensor preferences.
     add(SettingInfo::Toggle(StrId::STR_AUTO_ROTATE, &CrossPointSettings::autoRotate, "autoRotate",
                             StrId::STR_CAT_CONTROLS));
-    // Only show sensor controls when the active device has a supported IMU.
-    if (QuickActions::supportsTiltPageTurn()) {
-      auto shortPowerButtonIt = std::find_if(
-          v.begin(), v.end(), [](const SettingInfo& setting) { return settingKeyIs(setting, "shortPwrBtn"); });
-      if (shortPowerButtonIt != v.end()) {
-        auto insertPos = v.insert(shortPowerButtonIt + 1,
-                                  SettingInfo::Toggle(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
-                                                      "tiltPageTurn", StrId::STR_CAT_CONTROLS));
-        v.insert(
-            insertPos + 1,
-            SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN_DIRECTION, &CrossPointSettings::tiltPageTurnDirection,
+    auto shortPowerButtonIt = std::find_if(
+        v.begin(), v.end(), [](const SettingInfo& setting) { return settingKeyIs(setting, "shortPwrBtn"); });
+    if (shortPowerButtonIt != v.end()) {
+      auto insertPos = v.insert(shortPowerButtonIt + 1,
+                                SettingInfo::Toggle(StrId::STR_TILT_PAGE_TURN, &CrossPointSettings::tiltPageTurn,
+                                                    "tiltPageTurn", StrId::STR_CAT_CONTROLS));
+      v.insert(
+          insertPos + 1,
+          SettingInfo::Enum(StrId::STR_TILT_PAGE_TURN_DIRECTION, &CrossPointSettings::tiltPageTurnDirection,
 #if CROSSINK_APP_DEVICE_X4CLASSIC || defined(SIMULATOR_DEVICE_X4_CLASSIC)
-                              // X4 Classic's X-axis has the opposite sign from the original X3 calibration.
-                              // Keep the stored direction, but name its physical motion accurately.
-                              {StrId::STR_TILT_DIRECTION_LEFT_RIGHT_INVERTED, StrId::STR_TILT_DIRECTION_LEFT_RIGHT,
-                               StrId::STR_TILT_DIRECTION_FORWARD_BACK, StrId::STR_TILT_DIRECTION_FORWARD_BACK_INVERTED},
+                            // X4 Classic's X-axis has the opposite sign from the original X3 calibration.
+                            // Keep the stored direction, but name its physical motion accurately.
+                            {StrId::STR_TILT_DIRECTION_LEFT_RIGHT_INVERTED, StrId::STR_TILT_DIRECTION_LEFT_RIGHT,
+                             StrId::STR_TILT_DIRECTION_FORWARD_BACK, StrId::STR_TILT_DIRECTION_FORWARD_BACK_INVERTED},
 #else
-                              {StrId::STR_TILT_DIRECTION_LEFT_RIGHT, StrId::STR_TILT_DIRECTION_LEFT_RIGHT_INVERTED,
-                               StrId::STR_TILT_DIRECTION_FORWARD_BACK, StrId::STR_TILT_DIRECTION_FORWARD_BACK_INVERTED},
+                            {StrId::STR_TILT_DIRECTION_LEFT_RIGHT, StrId::STR_TILT_DIRECTION_LEFT_RIGHT_INVERTED,
+                             StrId::STR_TILT_DIRECTION_FORWARD_BACK, StrId::STR_TILT_DIRECTION_FORWARD_BACK_INVERTED},
 #endif
-                              "tiltPageTurnDirection", StrId::STR_CAT_CONTROLS));
-      }
-    } else {
-      for (auto& setting : v) {
-        if (settingKeyIs(setting, "shortPwrBtn") || settingKeyIs(setting, "longPwrBtn")) {
-          removeEnumRawValue(setting, static_cast<uint8_t>(CrossPointSettings::TOGGLE_TILT_PAGE_TURN));
-        } else if (setting.nameId == StrId::STR_LONG_PRESS_MENU_ACTION ||
-                   setting.nameId == StrId::STR_LONG_PRESS_BACK_ACTION) {
-          removeEnumRawValue(setting, static_cast<uint8_t>(CrossPointSettings::LONG_MENU_TOGGLE_TILT_PAGE_TURN));
-        }
-      }
+                            "tiltPageTurnDirection", StrId::STR_CAT_CONTROLS));
     }
 
     if (!gpio.deviceIsX3()) {

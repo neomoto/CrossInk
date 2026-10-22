@@ -534,7 +534,10 @@ inline void appendShortcutOptions(SettingInfo& setting, const ShortcutOptionCata
   }
 
   for (const auto action : QuickActions::shortcutActionOrder) {
-    if (!QuickActions::isActionAvailable(static_cast<uint8_t>(action))) continue;
+    // The persistent catalog must recognize tilt shortcuts even after a failed IMU probe.
+    if (action != CrossPointSettings::TOGGLE_TILT_PAGE_TURN &&
+        !QuickActions::isActionAvailable(static_cast<uint8_t>(action)))
+      continue;
     const uint8_t rawValue = shortcutRawValue(catalog, action);
     if (rawValue == SHORTCUT_OPTION_UNAVAILABLE) continue;
     setting.enumValues.push_back(QuickActions::actionLabel(static_cast<uint8_t>(action)));
@@ -599,9 +602,23 @@ const std::vector<SettingInfo>& getBaseSettingsList();
 inline std::vector<SettingInfo> getSettingsList(const SdCardFontRegistry* registry = nullptr,
                                                 const DictionaryRegistry* dictRegistry = nullptr) {
   std::vector<SettingInfo> v = getBaseSettingsList();
+  // Sensor availability affects the UI only, never the persisted schema.
   if (!QuickActions::supportsTiltPageTurn()) {
-    v.erase(std::remove_if(v.begin(), v.end(), [](const SettingInfo& s) { return s.nameId == StrId::STR_AUTO_ROTATE; }),
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [](const SettingInfo& s) {
+                             return s.nameId == StrId::STR_AUTO_ROTATE || s.nameId == StrId::STR_TILT_PAGE_TURN ||
+                                    s.nameId == StrId::STR_TILT_PAGE_TURN_DIRECTION;
+                           }),
             v.end());
+    for (auto& setting : v) {
+      if (settingKeyIs(setting, "shortPwrBtn") || settingKeyIs(setting, "longPwrBtn") ||
+          isSideButtonActionSetting(setting)) {
+        removeEnumRawValue(setting, static_cast<uint8_t>(CrossPointSettings::TOGGLE_TILT_PAGE_TURN));
+      } else if (setting.nameId == StrId::STR_LONG_PRESS_MENU_ACTION ||
+                 setting.nameId == StrId::STR_LONG_PRESS_BACK_ACTION) {
+        removeEnumRawValue(setting, static_cast<uint8_t>(CrossPointSettings::LONG_MENU_TOGGLE_TILT_PAGE_TURN));
+      }
+    }
   }
   if (!SETTINGS.shouldTrackReadingStats()) {
     for (auto& setting : v) {

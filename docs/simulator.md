@@ -92,8 +92,11 @@ CROSSINK_SIMULATOR_SMOKE_AUTO_ROTATION_TOUCH=1 \
   python3 scripts/run_simulator_smoke_test.py --env sticky-simulator --timeout 180 --no-build
 ```
 
-The no-IMU scenario uses the production JSON load/save path and checks that the
-control stays hidden without losing the preference. The Sticky scenario drives
+The no-IMU scenario uses the production JSON load/save path and checks that
+auto-rotation, tilt enable/direction, and physical-button tilt shortcuts survive
+an unrelated settings save. Sensor-only controls and shortcut choices stay hidden
+without changing their saved values. Run the same persistence scenario with
+`--env simulator-X3` to check the sensor-available path. The Sticky scenario drives
 raw HAL contacts while actual EPUB and TXT readers receive synthetic gravity.
 It covers two fingers with pinch resizing disabled, three with it enabled,
 partial releases down to one finger, and a suppressed single contact. Rotation

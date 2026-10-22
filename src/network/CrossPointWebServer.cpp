@@ -88,6 +88,7 @@ bool isWebEnumOptionAvailable(const SettingInfo& setting, size_t optionIndex) {
     }
   }
   if (option == StrId::STR_TOGGLE_TOUCHSCREEN && !gpio.hasTouch()) return false;
+  if (option == StrId::STR_TILT_PAGE_TURN && !QuickActions::supportsTiltPageTurn()) return false;
 
   if (!Frontlight.present()) {
     if (option == StrId::STR_TOGGLE_FRONTLIGHT ||
@@ -123,7 +124,9 @@ bool isWebSettingAvailable(const SettingInfo& setting) {
   if (setting.nameId == StrId::STR_SIDE_BUTTON_CHORD && !deviceSupportsSideButtonChord(gpio)) {
     return false;
   }
-  if (setting.nameId == StrId::STR_AUTO_ROTATE && !QuickActions::supportsTiltPageTurn()) {
+  if ((setting.nameId == StrId::STR_AUTO_ROTATE || setting.nameId == StrId::STR_TILT_PAGE_TURN ||
+       setting.nameId == StrId::STR_TILT_PAGE_TURN_DIRECTION) &&
+      !QuickActions::supportsTiltPageTurn()) {
     return false;
   }
 

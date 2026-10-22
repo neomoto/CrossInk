@@ -365,31 +365,86 @@ class SimulatorSmokeTest {
   }
 
   static void verifyAutoRotationPersistence() {
-    const uint8_t originalAutoRotate = SETTINGS.autoRotate;
+    static constexpr struct {
+      const char* key;
+      uint8_t CrossPointSettings::* member;
+      uint8_t savedValue;
+      uint8_t resetValue;
+      bool shortcut;
+    } preferences[] = {
+        {"autoRotate", &CrossPointSettings::autoRotate, 1, 0, false},
+        {"tiltPageTurn", &CrossPointSettings::tiltPageTurn, CrossPointSettings::TILT_ON, CrossPointSettings::TILT_OFF,
+         false},
+        {"tiltPageTurnDirection", &CrossPointSettings::tiltPageTurnDirection,
+         CrossPointSettings::TILT_FORWARD_BACK_INVERTED, CrossPointSettings::TILT_LEFT_RIGHT, false},
+        {"shortPwrBtn", &CrossPointSettings::shortPwrBtn, CrossPointSettings::TOGGLE_TILT_PAGE_TURN,
+         CrossPointSettings::IGNORE, true},
+        {"longPwrBtn", &CrossPointSettings::longPwrBtn, CrossPointSettings::TOGGLE_TILT_PAGE_TURN,
+         CrossPointSettings::IGNORE, true},
+        {"sideButtonUpShort", &CrossPointSettings::sideButtonUpShort, CrossPointSettings::TOGGLE_TILT_PAGE_TURN,
+         CrossPointSettings::IGNORE, true},
+        {"sideButtonUpLong", &CrossPointSettings::sideButtonUpLong, CrossPointSettings::TOGGLE_TILT_PAGE_TURN,
+         CrossPointSettings::IGNORE, true},
+        {"sideButtonDownShort", &CrossPointSettings::sideButtonDownShort, CrossPointSettings::TOGGLE_TILT_PAGE_TURN,
+         CrossPointSettings::IGNORE, true},
+        {"sideButtonDownLong", &CrossPointSettings::sideButtonDownLong, CrossPointSettings::TOGGLE_TILT_PAGE_TURN,
+         CrossPointSettings::IGNORE, true},
+        {"longPressMenuAction", &CrossPointSettings::longPressMenuAction,
+         CrossPointSettings::LONG_MENU_TOGGLE_TILT_PAGE_TURN, CrossPointSettings::LONG_MENU_OFF, true},
+        {"longPressBackAction", &CrossPointSettings::longPressBackAction,
+         CrossPointSettings::LONG_MENU_TOGGLE_TILT_PAGE_TURN, CrossPointSettings::LONG_MENU_OFF, true},
+    };
     JsonDocument original;
     SETTINGS.toJson(original);
+    const uint8_t originalScreenInverted = SETTINGS.screenInverted;
     JsonDocument requested;
     requested.set(original);
-    requested["autoRotate"] = 1;
-    SETTINGS.autoRotate = 0;
+    for (const auto& preference : preferences) {
+      requested[preference.key] = preference.savedValue;
+      SETTINGS.*preference.member = preference.resetValue;
+    }
+    const auto verifyPreferences = [](const char* operation) {
+      for (const auto& preference : preferences) {
+        if (SETTINGS.*preference.member != preference.savedValue)
+          fail("Sensor preference %s was lost during %s", preference.key, operation);
+      }
+    };
     SETTINGS.fromJson(requested.as<JsonVariantConst>());
-    if (SETTINGS.autoRotate != 1) fail("Auto-rotation preference was ignored while loading settings");
-    if (!SETTINGS.saveToFile()) fail("Cannot save auto-rotation preference");
-    SETTINGS.autoRotate = 0;
-    if (!SETTINGS.loadFromFile() || SETTINGS.autoRotate != 1)
-      fail("Auto-rotation preference did not survive the production settings save/reload");
+    verifyPreferences("settings load");
 
-    const auto controls = buildControlsSettingsParentList(getSettingsList());
-    const bool visible = std::any_of(controls.begin(), controls.end(),
-                                     [](const SettingInfo& setting) { return settingKeyIs(setting, "autoRotate"); });
-    if (visible != halTiltSensor.isAvailable())
-      fail("Auto-rotation control visibility does not match IMU availability");
+    const bool available = halTiltSensor.isAvailable();
+    const auto allSettings = getSettingsList();
+    const auto controls = buildControlsSettingsParentList(allSettings);
+    for (const auto& preference : preferences) {
+      const auto& settings = preference.shortcut ? allSettings : controls;
+      const auto setting = std::find_if(settings.begin(), settings.end(), [&preference](const SettingInfo& candidate) {
+        return settingKeyIs(candidate, preference.key);
+      });
+      if (!preference.shortcut) {
+        if ((setting != settings.end()) != available)
+          fail("Sensor control %s visibility does not match IMU availability", preference.key);
+      } else {
+        if (setting == settings.end()) fail("Missing shortcut setting %s", preference.key);
+        const bool offered = std::find(setting->enumRawValues.begin(), setting->enumRawValues.end(),
+                                       preference.savedValue) != setting->enumRawValues.end();
+        if (offered != available) fail("Tilt shortcut %s availability does not match the IMU", preference.key);
+      }
+    }
+    verifyPreferences("settings UI construction");
+
+    // Saving an unrelated setting must retain hidden preferences and shortcuts.
+    SETTINGS.screenInverted = !originalScreenInverted;
+    if (!SETTINGS.saveToFile()) fail("Cannot save sensor preferences with an unrelated setting");
+    for (const auto& preference : preferences) SETTINGS.*preference.member = preference.resetValue;
+    SETTINGS.screenInverted = originalScreenInverted;
+    if (!SETTINGS.loadFromFile()) fail("Cannot reload sensor preferences");
+    verifyPreferences("production settings save/reload");
+    if (SETTINGS.screenInverted != !originalScreenInverted) fail("Unrelated setting did not survive save/reload");
 
     SETTINGS.fromJson(original.as<JsonVariantConst>());
-    SETTINGS.autoRotate = originalAutoRotate;
-    if (!SETTINGS.saveToFile()) fail("Cannot restore settings after auto-rotation persistence check");
-    LOG_INF("SMOKE", "Auto-rotation preference survives save/reload; IMU=%s, control=%s",
-            halTiltSensor.isAvailable() ? "available" : "unavailable", visible ? "shown" : "hidden");
+    if (!SETTINGS.saveToFile()) fail("Cannot restore settings after sensor preference persistence check");
+    LOG_INF("SMOKE", "Sensor preferences and tilt shortcuts survive unrelated save/reload; IMU=%s",
+            available ? "available" : "unavailable");
   }
 
   static void verifyStatusBarSettings() {

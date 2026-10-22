@@ -60,6 +60,10 @@
 - Avoid rewriting current settings on every boot or wake when the device name
   already uses the canonical empty value for automatic naming. Continue to
   persist genuine repairs and legacy migrations.
+- Reveal complete accented and multibyte characters in hidden passwords instead
+  of displaying broken glyphs.
+- Preserve tilt-page-turn settings and tilt button shortcuts when the motion
+  sensor is unavailable; hide unsupported options without erasing saved choices.
 
 - Correct the X3's 180-degree in-plane sensor mounting for automatic EPUB/TXT
   rotation using labelled portrait/left/right measurements from one physical
